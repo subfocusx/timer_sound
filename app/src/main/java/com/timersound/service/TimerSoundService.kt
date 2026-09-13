@@ -1,4 +1,4 @@
-package timersound.service
+package com.timersound.service
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -27,10 +27,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.timersound.R
-import timersound.audio.AudioEngine
-import timersound.data.PreferencesRepository
-import timersound.timer.TimerSession
-import timersound.timer.TimerState
+import com.timersound.audio.AudioEngine
+import com.timersound.data.PreferencesRepository
+import com.timersound.timer.TimerSession
+import com.timersound.timer.TimerState
 
 /**
  * Foreground-сервис: единственный хозяин сессии таймера во время выполнения.
@@ -266,7 +266,7 @@ class TimerSoundService : Service() {
     }
 
     private fun openAppPendingIntent(): PendingIntent {
-        val intent = Intent(this, timersound.MainActivity::class.java).apply {
+        val intent = Intent(this, com.timersound.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         return PendingIntent.getActivity(
@@ -299,7 +299,7 @@ class TimerSoundService : Service() {
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) return
         wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "timersound:timer")
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "com.timersound:timer")
             .apply { acquire() }
     }
 
@@ -357,11 +357,11 @@ class TimerSoundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
-        const val ACTION_START = "timersound.intent.START"
-        const val ACTION_PAUSE = "timersound.intent.PAUSE"
-        const val ACTION_RESUME = "timersound.intent.RESUME"
-        const val ACTION_STOP = "timersound.intent.STOP"
-        const val ACTION_RESET = "timersound.intent.RESET"
+        const val ACTION_START = "com.timersound.intent.START"
+        const val ACTION_PAUSE = "com.timersound.intent.PAUSE"
+        const val ACTION_RESUME = "com.timersound.intent.RESUME"
+        const val ACTION_STOP = "com.timersound.intent.STOP"
+        const val ACTION_RESET = "com.timersound.intent.RESET"
         const val NOTIFICATION_ID = 1001
         const val COMPLETED_NOTIFICATION_ID = 1002
         const val CHANNEL_ID = "timer_running"

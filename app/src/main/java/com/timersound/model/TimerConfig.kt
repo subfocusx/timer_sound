@@ -1,4 +1,4 @@
-package timersound.model
+package com.timersound.model
 
 /**
  * Настройка одного звукового канала.

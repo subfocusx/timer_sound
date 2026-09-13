@@ -1,8 +1,8 @@
-package timersound.timer
+package com.timersound.timer
 
 import android.os.SystemClock
-import timersound.model.ChannelConfig
-import timersound.model.TimerConfig
+import com.timersound.model.ChannelConfig
+import com.timersound.model.TimerConfig
 
 /** Состояние машины состояний сессии таймера (I->R->P<->R->STOP/RESET/COMPLETED). */
 enum class TimerState { IDLE, RUNNING, PAUSED, COMPLETED }

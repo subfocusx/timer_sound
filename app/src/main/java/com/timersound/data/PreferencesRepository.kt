@@ -1,4 +1,4 @@
-package timersound.data
+package com.timersound.data
 
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -9,9 +9,9 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import timersound.model.ChannelConfig
-import timersound.model.Defaults
-import timersound.model.TimerConfig
+import com.timersound.model.ChannelConfig
+import com.timersound.model.Defaults
+import com.timersound.model.TimerConfig
 
 private val Context.dataStore by preferencesDataStore(name = "timer_sound")
 

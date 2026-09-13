@@ -1,4 +1,4 @@
-package timersound
+package com.timersound
 
 import android.app.Application
 import android.content.Intent
@@ -11,13 +11,13 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import timersound.audio.AudioEngine
-import timersound.data.PreferencesRepository
-import timersound.model.ChannelConfig
-import timersound.model.Defaults
-import timersound.model.TimerConfig
-import timersound.service.TimerSoundService
-import timersound.service.TimerStateHolder
+import com.timersound.audio.AudioEngine
+import com.timersound.data.PreferencesRepository
+import com.timersound.model.ChannelConfig
+import com.timersound.model.Defaults
+import com.timersound.model.TimerConfig
+import com.timersound.service.TimerSoundService
+import com.timersound.service.TimerStateHolder
 
 /**
  * ViewModel: единственный владелец конфигурации (читает/пишет DataStore,
@@ -161,6 +161,6 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Строковое представление интервала HH:MM:SS. */
     companion object {
-        fun formatInterval(ms: Long): String = timersound.timer.TimerSession.formatHms(ms)
+        fun formatInterval(ms: Long): String = com.timersound.timer.TimerSession.formatHms(ms)
     }
 }

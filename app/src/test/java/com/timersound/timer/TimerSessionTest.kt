@@ -1,4 +1,4 @@
-package timersound.timer
+package com.timersound.timer
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -6,8 +6,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import timersound.model.ChannelConfig
-import timersound.model.TimerConfig
+import com.timersound.model.ChannelConfig
+import com.timersound.model.TimerConfig
 
 /**
  * Юнит-тесты машины состояний и планирования [TimerSession].

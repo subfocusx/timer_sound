@@ -1,4 +1,4 @@
-package timersound.ui
+package com.timersound.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -43,11 +43,11 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import timersound.TimerViewModel
-import timersound.model.ChannelConfig
-import timersound.service.TimerStateHolder
-import timersound.timer.TimerSession
-import timersound.timer.TimerState
+import com.timersound.TimerViewModel
+import com.timersound.model.ChannelConfig
+import com.timersound.service.TimerStateHolder
+import com.timersound.timer.TimerSession
+import com.timersound.timer.TimerState
 
 /** Единственный экран приложения: статус, авто-остановка и 5 каналов. */
 @Composable

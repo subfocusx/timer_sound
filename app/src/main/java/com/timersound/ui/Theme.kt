@@ -1,4 +1,4 @@
-package timersound.ui
+package com.timersound.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme

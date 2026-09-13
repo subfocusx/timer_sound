@@ -1,8 +1,8 @@
-package timersound.service
+package com.timersound.service
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import timersound.timer.TimerState
+import com.timersound.timer.TimerState
 
 /**
  * In-process держатель состояния выполнения сессии: сервис пишет, UI читает

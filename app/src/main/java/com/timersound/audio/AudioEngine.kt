@@ -1,4 +1,4 @@
-package timersound.audio
+package com.timersound.audio
 
 import android.content.Context
 import android.media.AudioAttributes
@@ -6,7 +6,7 @@ import android.media.AudioManager
 import android.media.MediaPlayer
 import android.net.Uri
 import com.timersound.R
-import timersound.model.ChannelConfig
+import com.timersound.model.ChannelConfig
 
 /**
  * Audio engine: one independent [MediaPlayer] per channel - sounds play
