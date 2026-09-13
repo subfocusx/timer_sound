@@ -1,0 +1,22 @@
+# Gradle
+.gradle/
+build/
+
+# Android / IDE
+.idea/
+*.iml
+.vscode/
+*.code-workspace
+
+# Kotlin
+.kotlin/
+
+# Локальные пути окружения (машино-специфичны)
+local.properties
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Логи
+*.log
