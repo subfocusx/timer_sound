@@ -53,7 +53,14 @@ class TimerSoundService : Service() {
 
     private enum class Command { START, PAUSE, RESUME, STOP, RESET, TICK }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * Все команды и тики идут СТРОГО последовательно (один поток): у сессии два
+     * входа срабатывания — точный алярм (AlarmManager) и тик-цикл, — а
+     * [TimerSession] не потокобезопасна. При параллельном входе две нити видели
+     * одно и то же «пора звучать», обе жгли звук, а одна из них обнуляла
+     * расписание — сессия «N раз» завершалась на первом же срабатывании.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
     private val commands = Channel<Command>(Channel.UNLIMITED)
     private val session = TimerSession()
     private lateinit var prefs: PreferencesRepository
@@ -121,8 +128,11 @@ class TimerSoundService : Service() {
             acquireWakeLock()
             setupMediaSession(playing = true)
             startAsForeground()
-            val autoStopped = handleTick()
-            if (autoStopped) {
+            // Первый тик — сразу после старта: режим REPEAT без времени начала
+            // срабатывает мгновенно. Здесь важен ТОЛЬКО факт завершения сессии:
+            // срабатывание канала — не повод её останавливать (иначе первый же
+            // звук глушился releaseAll() и сессия уходила в COMPLETED).
+            if (handleTick()) {
                 handleAutoStop()
                 return@launch
             }
@@ -197,8 +207,9 @@ class TimerSoundService : Service() {
                     if (autoStopDeadline != null && autoStopDeadline <= 0L) {
                         true
                     } else {
+                        // Возврат handleTick означает, что серия отработала/сессия завершена:
+                        // его НЕЛЬЗЯ терять, иначе сервис останется висеть FGS со старым уведомлением.
                         handleTick(now)
-                        false
                     }
                 } else {
                     false
@@ -211,6 +222,12 @@ class TimerSoundService : Service() {
                     // Уведомление обновляем ~1 раз в секунду, состояние — каждый тик.
                     if (counter % 4 == 0) refreshNotification()
                     publishUiSnapshot()
+                } else {
+                    // Сессия завершилась/сброшена вне тик-цикла (алярм, авто-остановка, STOP):
+                    // публикуем актуальное состояние и выходим, не держа FGS вхолостую.
+                    publishUiSnapshot(stateOverride = session.state)
+                    if (session.state == TimerState.COMPLETED) handleAutoStop()
+                    return@launch
                 }
                 counter++
                 delay(250)
@@ -223,17 +240,20 @@ class TimerSoundService : Service() {
         tickJob = null
     }
 
+    /**
+     * Один тик сессии. Возвращает true, только если сценарий ЗАВЕРШЁН
+     * (все конечные серии отыграны или наступила авто-остановка).
+     * Само срабатывание канала завершением не является.
+     */
     private fun handleTick(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Boolean {
         val nextEvent = session.nextEventElapsedMs(nowElapsedMs)
         val wall = System.currentTimeMillis()
         Log.i(TAG, "tick alarmFired=false state=${session.state} nextEventElapsedMs=$nextEvent wall=$wall")
-        var fired = false
-        session.tick(nowElapsedMs) { channel ->
-            fired = true
+        val completed = session.tick(nowElapsedMs) { channel ->
             Log.i(TAG, "tick alarmFired=true state=${session.state} nextEventElapsedMs=${session.nextEventElapsedMs(nowElapsedMs)} wall=${System.currentTimeMillis()}")
             AudioEngine.play(applicationContext, channel)
         }
-        return fired || session.state == TimerState.COMPLETED
+        return completed || session.state == TimerState.COMPLETED
     }
 
     private fun onAlarmTick() {
@@ -449,7 +469,14 @@ class TimerSoundService : Service() {
         AudioEngine.releaseAll()
         releaseWakeLock()
         releaseMediaSession()
-        TimerStateHolder.reset()
+        // НЕ стираем статус «Завершено»: handleStop(completed = true) ставит COMPLETED
+        // прямо перед stopSelf(), а onDestroy() здесь не должен возвращать UI в IDLE —
+        // иначе пользователь видит «сброс» вместо «Завершено / Запустить заново».
+        // Стираем только активную (RUNNING/PAUSED) сессию — например, при убийстве
+        // процесса посреди работы, когда UI не должен залипать на «Идёт».
+        if (TimerStateHolder.ui.value.state != TimerState.COMPLETED) {
+            TimerStateHolder.reset()
+        }
         commands.close()
         scope.cancel()
         super.onDestroy()

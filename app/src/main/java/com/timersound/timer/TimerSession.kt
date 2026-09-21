@@ -44,6 +44,7 @@ class TimerSession {
     val isActive: Boolean get() = state == TimerState.RUNNING || state == TimerState.PAUSED
 
     /** Старт сессии: фиксируем сценарные моменты и переводим их в elapsed-шкалу. */
+    @Synchronized
     fun start(
         config: TimerConfig,
         nowElapsedMs: Long = SystemClock.elapsedRealtime(),
@@ -78,6 +79,7 @@ class TimerSession {
     }
 
     /** Пауза: запоминаем остатки до следующих срабатываний и до авто-остановки. */
+    @Synchronized
     fun pause(nowElapsedMs: Long = SystemClock.elapsedRealtime()) {
         if (state != TimerState.RUNNING) return
         scheduled.forEach { s ->
@@ -91,6 +93,7 @@ class TimerSession {
     }
 
     /** Возобновление: переносим сохранённые остатки от текущего момента. */
+    @Synchronized
     fun resume(nowElapsedMs: Long = SystemClock.elapsedRealtime()) {
         if (state != TimerState.PAUSED) return
         scheduled.forEach { s ->
@@ -104,6 +107,7 @@ class TimerSession {
     }
 
     /** Полная остановка (STOP) -> IDLE. */
+    @Synchronized
     fun stop() {
         scheduled.clear()
         autoStopDeadlineElapsedMs = Long.MAX_VALUE
@@ -112,12 +116,14 @@ class TimerSession {
     }
 
     /** Принудительно отметить сессию завершённой (авто-остановка). */
+    @Synchronized
     fun markCompleted() {
         scheduled.clear()
         state = TimerState.COMPLETED
     }
 
     /** Сбросить пометкy «Завершено» -> IDLE. */
+    @Synchronized
     fun reset() {
         scheduled.clear()
         autoStopDeadlineElapsedMs = Long.MAX_VALUE
@@ -129,6 +135,7 @@ class TimerSession {
      * Тик сессии, вызывается сервисом ~4 раза в секунду, пока RUNNING.
      * Возвращает true, когда сценарий завершён или сработала авто-остановка.
      */
+    @Synchronized
     fun tick(
         nowElapsedMs: Long = SystemClock.elapsedRealtime(),
         trigger: (ChannelConfig) -> Unit,
@@ -166,12 +173,14 @@ class TimerSession {
     }
 
     /** Сколько осталось до авто-остановки (null — без ограничения). */
+    @Synchronized
     fun countdownToAutoStopMs(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Long? {
         if (autoStopDeadlineElapsedMs == Long.MAX_VALUE) return null
         return (autoStopDeadlineElapsedMs - nowElapsedMs).coerceAtLeast(0L)
     }
 
     /** Дата следующего звука для уведомления; null, если канал не запланирован. */
+    @Synchronized
     fun nextFireForChannel(channelId: Int, nowElapsedMs: Long = SystemClock.elapsedRealtime()): Long? {
         if (!isActive) return null
         return scheduled.firstOrNull { it.config.id == channelId }
@@ -179,12 +188,14 @@ class TimerSession {
     }
 
     /** Общий следующий звук (ближайший по времени) для строки уведомления. */
+    @Synchronized
     fun nextEventElapsedMs(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Long? {
         if (!isActive) return null
         return scheduled.minByOrNull { it.nextFireElapsedMs }?.nextFireElapsedMs
     }
 
     /** Общий следующий звук (ближайший по времени) для строки уведомления. */
+    @Synchronized
     fun nextSoundDescription(nowElapsedMs: Long = SystemClock.elapsedRealtime()): String {
         val next = nextEventElapsedMs(nowElapsedMs) ?: return "—"
         val remain = (next - nowElapsedMs).coerceAtLeast(0L)
