@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -56,6 +58,13 @@ fun App(vm: TimerViewModel = viewModel()) {
     val config by vm.config.collectAsStateWithLifecycle()
     val runtime by vm.runtime.collectAsStateWithLifecycle()
     NotificationPermissionRequest()
+
+    // Пока сессия активна — не даём экрану гаснуть (этот Huawei засыпает сам,
+    // а погасший экран перехватывает тапы и прячет UI, что «выглядит как сброс»).
+    val view = LocalView.current
+    SideEffect {
+        view.keepScreenOn = runtime.state == TimerState.RUNNING || runtime.state == TimerState.PAUSED
+    }
 
     val missing = config.missingFileChannels()
     val invalid = config.invalidScheduleChannels()

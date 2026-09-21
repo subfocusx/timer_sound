@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.net.Uri
+import android.util.Log
 import com.timersound.R
 import com.timersound.model.ChannelConfig
 
@@ -24,6 +25,8 @@ import com.timersound.model.ChannelConfig
  */
 object AudioEngine {
 
+    private const val TAG = "TimerSound"
+
     /** Session channel players (key = channel id) and preview players. */
     private val players = mutableMapOf<Int, Ringtone>()
     private val previewPlayers = mutableMapOf<Int, Ringtone>()
@@ -36,13 +39,19 @@ object AudioEngine {
     fun play(context: Context, channel: ChannelConfig) {
         synchronized(lock) {
             try {
-                val ring = createRingtone(context, channel) ?: return
+                val ring = createRingtone(context, channel)
+                if (ring == null) {
+                    Log.w(TAG, "AudioEngine.play: NO ringtone ch=${channel.id} uri=${channel.fileUri} - aborted")
+                    return
+                }
                 players.remove(channel.id)?.let { runCatching { it.stop() } }
                 ring.setVolume(channel.volumePercent / 100f)
                 players[channel.id] = ring
+                Log.i(TAG, "AudioEngine.play: calling ring.play() ch=${channel.id} uri=${channel.fileUri}")
                 ring.play()
-            } catch (_: Exception) {
-                // Failure of one channel must not crash the whole session.
+                Log.i(TAG, "AudioEngine.play: returned OK ch=${channel.id}")
+            } catch (e: Exception) {
+                Log.e(TAG, "AudioEngine.play: EXCEPTION ch=${channel.id} uri=${channel.fileUri}: ${e}", e)
             }
         }
     }
@@ -80,28 +89,25 @@ object AudioEngine {
     }
 
     private fun createRingtone(context: Context, channel: ChannelConfig): Ringtone? {
+        val uriStr = if (channel.isBuiltInBeep) {
+            "android.resource://${context.packageName}/${R.raw.beep}"
+        } else {
+            channel.fileUri
+        }
+        Log.i(TAG, "AudioEngine.createRingtone: ch=${channel.id} uri=$uriStr")
         return try {
-            val uri = if (channel.isBuiltInBeep) {
-                // Built-in signal also rings as a Uri source:
-                // android.resource://<package>/<raw-id>
-                Uri.parse("android.resource://${context.packageName}/${R.raw.beep}")
-            } else {
-                Uri.parse(channel.fileUri)
-            }
-            RingtoneManager.getRingtone(context, uri).also { ring ->
-                // Ring through the MEDIA stream (like the original engine did):
-                // Ringtone's default USAGE_NOTIFICATION_RINGTONE stream sits at the
-                // phone's ring volume (often ~1 = inaudible), while media volume is
-                // the one the user actually hears. Also the FGS is mediaPlayback -
-                // media stream keeps the audio focus the user expects.
-                ring.setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build()
-                )
-            }
-        } catch (_: Exception) {
+            val uri = Uri.parse(uriStr)
+            val ring = RingtoneManager.getRingtone(context, uri)
+            Log.i(TAG, "AudioEngine.getRingtone: OK ch=${channel.id} ring=$ring")
+            ring.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+            )
+            ring
+        } catch (e: Exception) {
+            Log.e(TAG, "AudioEngine.getRingtone: FAILED ch=${channel.id} uri=$uriStr: ${e}", e)
             null
         }
     }
