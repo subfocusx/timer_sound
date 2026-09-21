@@ -2,83 +2,60 @@ package com.timersound.audio
 
 import android.content.Context
 import android.media.AudioAttributes
-import android.media.AudioManager
-import android.media.MediaPlayer
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.net.Uri
 import com.timersound.R
 import com.timersound.model.ChannelConfig
 
 /**
- * Audio engine: one independent [MediaPlayer] per channel - sounds play
- * simultaneously (no sequential queue), with per-channel volume.
+ * Audio engine: one independent [Ringtone] per channel - timers ring through the
+ * system clock/alarm stream, so several channels can sound independently (no
+ * sequential queue), with per-channel volume ([Ringtone.setVolume]).
+ *
+ * SINGLE source of truth: [MediaPlayer] silently drops on this device (no audio
+ * on Android 9 / EMUI 29 - even the bundled beep doesn't play; the media service
+ * releases the player immediately). [Ringtone] is the system alarm path that
+ * actually rings the phone, and it does not need foreground media focus.
  *
  * Single in-process instance: used by the service (session) and the UI layer
- * (preview). All players are always released on stop / service destroy
- * ([releaseAll]) - no leaks.
- *
- * Only async preparation ([MediaPlayer.prepareAsync]): [preview] is called from
- * the main thread (onClick), a synchronous [MediaPlayer.prepare] on large SAF
- * files would block the UI; the session tick loop also never blocks on prepare.
+ * (preview). All rings are always stopped on stop / service destroy ([releaseAll])
+ * - no leaks.
  */
 object AudioEngine {
 
     /** Session channel players (key = channel id) and preview players. */
-    private val players = mutableMapOf<Int, MediaPlayer>()
-    private val previewPlayers = mutableMapOf<Int, MediaPlayer>()
+    private val players = mutableMapOf<Int, Ringtone>()
+    private val previewPlayers = mutableMapOf<Int, Ringtone>()
     private val lock = Any()
 
-    private val attributes: AudioAttributes = AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_MEDIA)
-        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-        .build()
-
-    private var audioManager: AudioManager? = null
-    private var audioFocusListener: AudioManager.OnAudioFocusChangeListener? = null
-
-    private fun requestAudioFocusIfNeeded(context: Context) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        if (audioFocusListener == null) {
-            val listener = AudioManager.OnAudioFocusChangeListener {}
-            if (am.requestAudioFocus(
-                    listener,
-                    AudioManager.STREAM_MUSIC,
-                    AudioManager.AUDIOFOCUS_GAIN
-                ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-            ) {
-                audioManager = am
-                audioFocusListener = listener
-            }
-        }
-    }
-
     /**
-     * Play channel file once (interval fire). If the channel is still sounding
-     * from the previous interval - the player is recreated.
+     * Ring channel signal once (interval fire). If the channel is still sounding
+     * from the previous interval - the ringtone is stopped and re-created.
      */
     fun play(context: Context, channel: ChannelConfig) {
         synchronized(lock) {
             try {
-                requestAudioFocusIfNeeded(context)
-                val player = createPlayer(context, channel) ?: return
-                players.remove(channel.id)?.let { runCatching { it.release() } }
-                players[channel.id] = player
-                attachLifecycle(player, channel.id) { releasePlayer(players, channel.id, it) }
-                player.startWhenPrepared(channel.id)
+                val ring = createRingtone(context, channel) ?: return
+                players.remove(channel.id)?.let { runCatching { it.stop() } }
+                ring.setVolume(channel.volumePercent / 100f)
+                players[channel.id] = ring
+                ring.play()
             } catch (_: Exception) {
                 // Failure of one channel must not crash the whole session.
             }
         }
     }
 
-    /** One-shot preview of a channel file (not tied to the timer session). */
+    /** One-shot preview of a channel signal (not tied to the timer session). */
     fun preview(context: Context, channel: ChannelConfig) {
         synchronized(lock) {
             try {
-                val player = createPlayer(context, channel) ?: return
-                previewPlayers.remove(channel.id)?.let { runCatching { it.release() } }
-                previewPlayers[channel.id] = player
-                attachLifecycle(player, channel.id) { releasePlayer(previewPlayers, channel.id, it) }
-                player.startWhenPrepared(channel.id)
+                val ring = createRingtone(context, channel) ?: return
+                previewPlayers.remove(channel.id)?.let { runCatching { it.stop() } }
+                ring.setVolume(channel.volumePercent / 100f)
+                previewPlayers[channel.id] = ring
+                ring.play()
             } catch (_: Exception) {
             }
         }
@@ -87,74 +64,45 @@ object AudioEngine {
     /** Stop and release a specific channel. */
     fun stopChannel(channelId: Int) {
         synchronized(lock) {
-            players.remove(channelId)?.let { runCatching { it.release() } }
-            previewPlayers.remove(channelId)?.let { runCatching { it.release() } }
+            players.remove(channelId)?.let { runCatching { it.stop() } }
+            previewPlayers.remove(channelId)?.let { runCatching { it.stop() } }
         }
     }
 
-    /** Stop everything and release all players (STOP, auto-stop, service destroy). */
+    /** Stop everything and release all rings (STOP, auto-stop, service destroy). */
     fun releaseAll() {
         synchronized(lock) {
-            players.values.forEach { runCatching { it.release() } }
+            players.values.forEach { runCatching { it.stop() } }
             players.clear()
-            previewPlayers.values.forEach { runCatching { it.release() } }
+            previewPlayers.values.forEach { runCatching { it.stop() } }
             previewPlayers.clear()
-            audioFocusListener?.let { audioManager?.abandonAudioFocus(it) }
-            audioFocusListener = null
-            audioManager = null
         }
     }
 
-    private fun releasePlayer(map: MutableMap<Int, MediaPlayer>, channelId: Int, player: MediaPlayer) {
-        synchronized(lock) {
-            // Only if it is still the same player (it may have been recreated).
-            if (map[channelId] === player) map.remove(channelId)
-            runCatching { player.release() }
-        }
-    }
-
-    /**
-     * Async start: preparation (prepareAsync) does not block the calling thread
-     * (main for preview); the player starts in onPrepared. A player recreated
-     * before preparation does not start - checked by identity.
-     */
-    private fun MediaPlayer.startWhenPrepared(channelId: Int) {
-        setOnPreparedListener { p ->
-            synchronized(lock) {
-                if (players[channelId] !== p && previewPlayers[channelId] !== p) {
-                    runCatching { p.release() }
-                } else {
-                    runCatching { p.start() }
-                }
+    private fun createRingtone(context: Context, channel: ChannelConfig): Ringtone? {
+        return try {
+            val uri = if (channel.isBuiltInBeep) {
+                // Built-in signal also rings as a Uri source:
+                // android.resource://<package>/<raw-id>
+                Uri.parse("android.resource://${context.packageName}/${R.raw.beep}")
+            } else {
+                Uri.parse(channel.fileUri)
             }
+            RingtoneManager.getRingtone(context, uri).also { ring ->
+                // Ring through the MEDIA stream (like the original engine did):
+                // Ringtone's default USAGE_NOTIFICATION_RINGTONE stream sits at the
+                // phone's ring volume (often ~1 = inaudible), while media volume is
+                // the one the user actually hears. Also the FGS is mediaPlayback -
+                // media stream keeps the audio focus the user expects.
+                ring.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
+            }
+        } catch (_: Exception) {
+            null
         }
-        prepareAsync()
-    }
-
-    private fun attachLifecycle(
-        player: MediaPlayer,
-        channelId: Int,
-        onFinished: (MediaPlayer) -> Unit,
-    ) {
-        player.setOnCompletionListener { p -> synchronized(lock) { onFinished(p) } }
-        player.setOnErrorListener { p, _, _ -> synchronized(lock) { onFinished(p) }; true }
-        // onPrepared is added in startWhenPrepared (prepareAsync is there too).
-    }
-
-    private fun createPlayer(context: Context, channel: ChannelConfig): MediaPlayer? {
-        val mp = MediaPlayer(context)
-        mp.setAudioAttributes(attributes)
-        val uri = if (channel.isBuiltInBeep) {
-            // Built-in beep also plays via a Uri source (SDK 37 has no
-            // MediaPlayer.create(Context, resid, ...) overloads):
-            // android.resource://<package>/<raw-id>
-            Uri.parse("android.resource://${context.packageName}/${R.raw.beep}")
-        } else {
-            Uri.parse(channel.fileUri)
-        }
-        // SAF: persistable read permission was taken when the file was picked.
-        mp.setDataSource(context, uri)
-        mp.setVolume(channel.volumePercent / 100f, channel.volumePercent / 100f)
-        return mp
     }
 }
