@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Keep CPU alive while the timer runs with the screen off -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Allow the service to schedule exact alarm-clock events -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <!-- Show the running-timer notification on Android 13+ -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
