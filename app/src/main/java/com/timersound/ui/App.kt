@@ -45,6 +45,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.timersound.TimerViewModel
 import com.timersound.model.ChannelConfig
+import com.timersound.model.SceneMode
 import com.timersound.service.TimerStateHolder
 import com.timersound.timer.TimerSession
 import com.timersound.timer.TimerState
@@ -57,7 +58,9 @@ fun App(vm: TimerViewModel = viewModel()) {
     NotificationPermissionRequest()
 
     val missing = config.missingFileChannels()
-    val canStart = missing.isEmpty() && config.playableChannels().isNotEmpty()
+    val invalid = config.invalidScheduleChannels()
+    val canStart =
+        missing.isEmpty() && config.playableChannels().isNotEmpty() && invalid.isEmpty()
 
     Scaffold { innerPadding ->
         LazyColumn(
@@ -66,13 +69,13 @@ fun App(vm: TimerViewModel = viewModel()) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item(key = "status") {
-                StatusCard(runtime = runtime, canStart = canStart, missing = missing, vm = vm)
+                StatusCard(runtime = runtime, canStart = canStart, missing = missing, invalid = invalid, vm = vm)
             }
             item(key = "autostop") {
                 AutoStopCard(autoStopMs = config.autoStopMs, onAutoStopChange = vm::setAutoStop)
             }
             items(config.channels, key = { it.id }) { channel ->
-                ChannelCard(channel = channel, vm = vm)
+                ChannelCard(channel = channel, index = config.channels.indexOf(channel), vm = vm)
             }
         }
     }
@@ -85,6 +88,7 @@ private fun StatusCard(
     runtime: TimerStateHolder.Ui,
     canStart: Boolean,
     missing: List<ChannelConfig>,
+    invalid: List<ChannelConfig>,
     vm: TimerViewModel,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -135,10 +139,13 @@ private fun StatusCard(
                 }
             }
             if (!canStart) {
-                val hint = if (missing.isEmpty()) {
-                    "Включите хотя бы один канал с файлом."
-                } else {
-                    "Для старта укажите файл: " + missing.joinToString { it.name }
+                val hint = when {
+                    invalid.isNotEmpty() ->
+                        "Исправьте расписание: " + invalid.joinToString { it.name } +
+                            " (проверь режим, время/количество)."
+                    missing.isNotEmpty() ->
+                        "Для старта укажите файл: " + missing.joinToString { it.name }
+                    else -> "Включите хотя бы один канал с файлом."
                 }
                 Text(
                     text = hint,
@@ -216,7 +223,7 @@ private fun AutoStopCard(autoStopMs: Long, onAutoStopChange: (Long) -> Unit) {
 // ------------------------------------------------------------------ channel card
 
 @Composable
-private fun ChannelCard(channel: ChannelConfig, vm: TimerViewModel) {
+private fun ChannelCard(channel: ChannelConfig, index: Int, vm: TimerViewModel) {
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { vm.onFilePicked(channel.id, it) }
     }
@@ -263,19 +270,83 @@ private fun ChannelCard(channel: ChannelConfig, vm: TimerViewModel) {
                 }
             }
 
-            // Интервал
-            DurationField(
-                valueMs = channel.intervalMs,
-                onChange = { vm.setInterval(channel.id, it) },
-                label = "Интервал ЧЧ:ММ:СС",
+            // Рам: выбор режима сценария
+            Text(
+                text = "Режим",
+                style = MaterialTheme.typography.titleSmall,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Presets.forEach { (label, ms) ->
+                SceneMode.values().forEach { mode ->
                     FilterChip(
-                        selected = channel.intervalMs == ms,
-                        onClick = { vm.setInterval(channel.id, ms) },
-                        label = { Text(label) },
+                        selected = channel.mode == mode,
+                        onClick = { vm.setMode(index, mode) },
+                        label = { Text(mode.label) },
                     )
+                }
+            }
+
+            // Поля конкретного режима
+            when (channel.mode) {
+                SceneMode.REPEAT -> {
+                    TimeField(
+                        value = channel.startMinutes,
+                        onChange = { vm.setStartMinutes(index, it) },
+                        label = "Начать с (HH:MM), пусто — сразу",
+                    )
+                }
+                SceneMode.ONCE_TIME -> {
+                    TimeField(
+                        value = channel.startMinutes,
+                        onChange = { vm.setStartMinutes(index, it) },
+                        label = "Время (HH:MM)",
+                    )
+                }
+                SceneMode.INTERVAL -> {
+                    TimeField(
+                        value = channel.startMinutes,
+                        onChange = { vm.setStartMinutes(index, it) },
+                        label = "Первый в (HH:MM)",
+                    )
+                    CountField(
+                        value = channel.launchCount,
+                        onChange = { vm.setLaunchCount(index, it) },
+                        label = "Сколько раз",
+                    )
+                }
+                SceneMode.RANDOM -> {
+                    TimeField(
+                        value = channel.startMinutes,
+                        onChange = { vm.setStartMinutes(index, it) },
+                        label = "Окно от (HH:MM)",
+                    )
+                    TimeField(
+                        value = channel.endMinutes,
+                        onChange = { vm.setEndMinutes(index, it) },
+                        label = "Окно до (HH:MM, не вкл.)",
+                    )
+                    CountField(
+                        value = channel.launchCount,
+                        onChange = { vm.setLaunchCount(index, it) },
+                        label = "Сколько звуков",
+                    )
+                }
+            }
+
+            // Интервал: актуален только для бесконечного повтора и N-раз
+            if (channel.mode == SceneMode.REPEAT || channel.mode == SceneMode.INTERVAL) {
+                DurationField(
+                    valueMs = channel.intervalMs,
+                    onChange = { vm.setInterval(channel.id, it) },
+                    label = "Интервал ЧЧ:ММ:СС",
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Presets.forEach { (label, ms) ->
+                        FilterChip(
+                            selected = channel.intervalMs == ms,
+                            onClick = { vm.setInterval(channel.id, ms) },
+                            label = { Text(label) },
+                        )
+                    }
                 }
             }
 
@@ -340,6 +411,58 @@ internal fun parseHms(text: String): Long? {
     if (m > 59 || s > 59) return null
     return (h * 3600L + m * 60L + s) * 1000L
 }
+
+/** Поле времени «ЧЧ:ММ» → минуты с полуночи; null — пусто/невалидно. */
+@Composable
+private fun TimeField(value: Int?, onChange: (Int?) -> Unit, label: String) {
+    var text by remember(value) { mutableStateOf(value?.let(::formatMinutes) ?: "") }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            val cleaned = raw.filter { it.isDigit() || it == ':' }.take(5)
+            text = cleaned
+            onChange(parseHm(cleaned))
+        },
+        singleLine = true,
+        isError = text.isNotEmpty() && parseHm(text) == null,
+        label = { Text(label) },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+    )
+}
+
+/** Числовое поле количества срабатываний. */
+@Composable
+private fun CountField(value: Int, onChange: (Int) -> Unit, label: String) {
+    OutlinedTextField(
+        value = if (value == 0) "" else value.toString(),
+        onValueChange = { raw ->
+            onChange(raw.filter { it.isDigit() }.take(6).toIntOrNull() ?: 0)
+        },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        label = { Text(label) },
+    )
+}
+
+/** Разбор «ЧЧ:ММ» в минуты с полуночи; 24:00 допустимо только как 1440 (конец окна). */
+internal fun parseHm(text: String): Int? {
+    if (text.length != 5) return null
+    val parts = text.split(':')
+    if (parts.size != 2) return null
+    val h = parts[0].toIntOrNull() ?: return null
+    val m = parts[1].toIntOrNull() ?: return null
+    if (m > 59) return null
+    val total = h * 60 + m
+    return when {
+        total <= 24 * 60 - 1 -> total // 00:00..23:59
+        total == 24 * 60 && m == 0 -> total // 24:00 → 1440
+        else -> null
+    }
+}
+
+/** Обратное отображение минут в «ЧЧ:ММ»; 1440 → «24:00». */
+internal fun formatMinutes(minutes: Int): String =
+    if (minutes == 24 * 60) "24:00" else "%02d:%02d".format(minutes / 60, minutes % 60)
 
 // ------------------------------------------------------------------ permissions
 
