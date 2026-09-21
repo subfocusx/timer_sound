@@ -7,14 +7,15 @@ import android.provider.OpenableColumns
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import com.timersound.audio.AudioEngine
 import com.timersound.data.PreferencesRepository
 import com.timersound.model.ChannelConfig
 import com.timersound.model.Defaults
+import com.timersound.model.SceneMode
 import com.timersound.model.TimerConfig
 import com.timersound.service.TimerSoundService
 import com.timersound.service.TimerStateHolder
@@ -28,9 +29,17 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repo = PreferencesRepository(application)
 
+    private val _configMode = MutableStateFlow(Defaults.defaultConfig())
+
     /** Текущая конфигурация каналов и авто-остановки (персист, без сети). */
-    val config: StateFlow<TimerConfig> = repo.config
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Defaults.defaultConfig())
+    val configMode: StateFlow<TimerConfig> = _configMode.asStateFlow()
+    val config: StateFlow<TimerConfig> = configMode
+
+    init {
+        viewModelScope.launch {
+            repo.config.collect { _configMode.value = it }
+        }
+    }
 
     /** Состояние выполнения сессии из сервиса. */
     val runtime: StateFlow<TimerStateHolder.Ui> = TimerStateHolder.ui
@@ -99,11 +108,35 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setMode(index: Int, mode: SceneMode) {
+        updateConfig(index) { it.copy(mode = mode) }
+    }
+
+    fun setStartMinutes(index: Int, minutes: Int?) {
+        updateConfig(index) { it.copy(startMinutes = minutes) }
+    }
+
+    fun setEndMinutes(index: Int, minutes: Int?) {
+        updateConfig(index) { it.copy(endMinutes = minutes) }
+    }
+
+    fun setLaunchCount(index: Int, count: Int) {
+        updateConfig(index) { it.copy(launchCount = count) }
+    }
+
+    /** Изменение интервала сценария по его ID (существующий API UI). */
     fun setInterval(channelId: Int, ms: Long) {
         update { cfg ->
             cfg.copy(channels = cfg.channels.map { ch ->
                 if (ch.id == channelId) ch.copy(intervalMs = ms.coerceAtLeast(Defaults.MIN_INTERVAL_MS)) else ch
             })
+        }
+    }
+
+    /** Изменение интервала сценария по индексу в списке UI. */
+    fun setIntervalAt(index: Int, ms: Long) {
+        updateConfig(index) {
+            it.copy(intervalMs = ms.coerceAtLeast(Defaults.MIN_INTERVAL_MS))
         }
     }
 
@@ -127,9 +160,23 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         update { it.copy(autoStopMs = ms.coerceAtLeast(0L)) }
     }
 
-    private fun update(transform: (TimerConfig) -> TimerConfig) {
+    private fun updateConfig(index: Int, transform: (ChannelConfig) -> ChannelConfig) {
+        val current = _configMode.value
+        val next = current.copy(
+            channels = current.channels.mapIndexed { currentIndex, currentChannel ->
+                if (currentIndex == index) transform(currentChannel) else currentChannel
+            },
+        )
+        _configMode.value = next
         viewModelScope.launch {
-            val next = transform(config.value)
+            repo.save(next)
+        }
+    }
+
+    private fun update(transform: (TimerConfig) -> TimerConfig) {
+        val next = transform(_configMode.value)
+        _configMode.value = next
+        viewModelScope.launch {
             repo.save(next)
         }
     }
