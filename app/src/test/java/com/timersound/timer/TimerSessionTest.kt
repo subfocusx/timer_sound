@@ -6,7 +6,10 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Calendar
+import java.util.TimeZone
 import com.timersound.model.ChannelConfig
+import com.timersound.model.SceneMode
 import com.timersound.model.TimerConfig
 
 /**
@@ -24,11 +27,19 @@ class TimerSessionTest {
         intervalMs: Long = 60_000L,
         enabled: Boolean = true,
         fileUri: String = "file:///tmp/ch${id}.mp3",
+        mode: SceneMode = SceneMode.REPEAT,
+        startMinutes: Int? = null,
+        endMinutes: Int? = null,
+        launchCount: Int = 0,
     ): ChannelConfig = ChannelConfig(
         id = id,
         name = "Канал ${id + 1}",
         fileUri = fileUri,
+        mode = mode,
         intervalMs = intervalMs,
+        startMinutes = startMinutes,
+        endMinutes = endMinutes,
+        launchCount = launchCount,
         volumePercent = 80,
         enabled = enabled,
     )
@@ -49,14 +60,16 @@ class TimerSessionTest {
         assertTrue(session.isRunning)
         assertTrue(session.isActive)
 
-        // До первого срабатывания триггер не вызывается.
+        // REPEAT без окна стартует немедленно.
         val fired = mutableListOf<Int>()
-        assertFalse(session.tick(now + 19_999L) { fired += it.id })
-        assertTrue(fired.isEmpty())
-
-        // Ровно на границе — срабатывает.
-        assertFalse(session.tick(now + 20_000L) { fired += it.id })
+        session.tick(now) { fired += it.id }
         assertEquals(listOf(0), fired)
+
+        // Следующее срабатывание — через интервал.
+        assertFalse(session.tick(now + 19_999L) { fired += it.id })
+        assertEquals(listOf(0), fired)
+        session.tick(now + 20_000L) { fired += it.id }
+        assertEquals(listOf(0, 0), fired)
     }
 
     @Test
@@ -83,10 +96,10 @@ class TimerSessionTest {
         val now = 0L
         session.start(config(listOf(channel(0, intervalMs = 5_000L))), now)
 
-        // Пропуск тиков: за 25 с должно накопиться 5 срабатываний.
+        // Пропуск тиков: с учётом немедленного старта за 25 с проходит 6 срабатываний.
         val fired = mutableListOf<Int>()
         session.tick(now + 25_000L) { fired += it.id }
-        assertEquals(5, fired.size)
+        assertEquals(6, fired.size)
     }
 
     @Test
@@ -97,10 +110,12 @@ class TimerSessionTest {
         session.start(config(listOf(channel(0, intervalMs = 200L))), now)
 
         val fired = mutableListOf<Int>()
+        session.tick(now) { fired += it.id }
+        assertEquals(listOf(0), fired)
         session.tick(now + 999L) { fired += it.id }
-        assertTrue(fired.isEmpty())
+        assertEquals(1, fired.size)
         session.tick(now + 1_000L) { fired += it.id }
-        assertFalse(fired.isEmpty())
+        assertEquals(2, fired.size)
     }
 
     @Test
@@ -121,8 +136,8 @@ class TimerSessionTest {
         session.tick(now + 10_000L) { fired[it.id] = (fired[it.id] ?: 0) + 1 }
         session.tick(now + 20_000L) { fired[it.id] = (fired[it.id] ?: 0) + 1 }
 
-        assertEquals(2, fired[0])
-        assertEquals(1, fired[1])
+        assertEquals(3, fired[0])
+        assertEquals(2, fired[1])
     }
 
     @Test
@@ -140,8 +155,8 @@ class TimerSessionTest {
         session.start(cfg, 0L)
         val fired = mutableListOf<Int>()
         session.tick(60_000L) { fired += it.id }
-        // disabled (1) и без файла (2) не звучат.
-        assertEquals(listOf(0), fired)
+        // disabled (1) и без файла (2) не звучат; REPEAT уже сработал при старте.
+        assertEquals(listOf(0, 0), fired)
     }
 
     // ---------------------------------------------------------------- pause / resume
@@ -152,18 +167,21 @@ class TimerSessionTest {
         val now = 0L
         session.start(config(listOf(channel(0, intervalMs = 10_000L))), now)
 
-        // Пауза на 3-й секунде: остаток до звука 7 с.
+        // Первый REPEAT-звук срабатывает сразу; затем пауза на 3-й секунде.
+        val fired = mutableListOf<Int>()
+        session.tick(now) { fired += it.id }
+        assertEquals(listOf(0), fired)
+        fired.clear()
         session.pause(now + 3_000L)
         assertEquals(TimerState.PAUSED, session.state)
         assertFalse(session.isRunning)
         assertTrue(session.isActive)
 
         // Во время паузы тики не срабатывают.
-        val fired = mutableListOf<Int>()
         session.tick(now + 50_000L) { fired += it.id }
         assertTrue(fired.isEmpty())
 
-        // Резюме в момент T=10 с: звук должен наступить через оставшиеся 7 с.
+        // Резюме в момент T=10 с: звук наступает через сохранённые 7 с.
         session.resume(now + 10_000L)
         assertEquals(TimerState.RUNNING, session.state)
         assertFalse(session.tick(now + 16_999L) { fired += it.id })
@@ -264,7 +282,7 @@ class TimerSessionTest {
         )
         val desc = session.nextSoundDescription(now + 3_000L)
         assertNotNull(desc)
-        assertTrue("ожидается «Канал 2» в описании: $desc", desc.contains("Канал 2"))
+        assertTrue("ожидается «Канал 1» в описании: $desc", desc.contains("Канал 1"))
         assertTrue(desc.contains("через"))
     }
 
@@ -273,11 +291,124 @@ class TimerSessionTest {
         val session = TimerSession()
         val now = 0L
         session.start(config(listOf(channel(0, intervalMs = 10_000L))), now)
+        session.tick(now) { }
 
         assertEquals(10_000L, session.nextFireForChannel(0, now))
         assertEquals(2_000L, session.nextFireForChannel(0, now + 8_000L))
         assertEquals(0L, session.nextFireForChannel(0, now + 20_000L))
         assertNull(session.nextFireForChannel(3, now))
+    }
+
+    // ---------------------------------------------------------------- schedule modes
+
+    @Test
+    fun repeatWithoutStartTimeFiresImmediately() {
+        val session = TimerSession()
+        session.start(config(listOf(channel(0))), 0L)
+
+        val fired = mutableListOf<Int>()
+        session.tick(0L) { fired += it.id }
+
+        assertEquals(listOf(0), fired)
+    }
+
+    @Test
+    fun onceTimeFiresOnceAndNotAgain() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val nowWall = epochUtc(2026, 9, 21, 11, 0, 0)
+        val nowElapsed = 1_000_000L
+        val ch = channel(
+            id = 1,
+            mode = SceneMode.ONCE_TIME,
+            startMinutes = 11 * 60 + 45,
+        )
+        val session = TimerSession()
+        session.start(config(listOf(ch)), nowElapsed, nowWall)
+        val fired = mutableListOf<Int>()
+
+        session.tick(nowElapsed + 45 * 60_000L - 1L) { fired += it.id }
+        assertTrue(fired.isEmpty())
+        session.tick(nowElapsed + 45 * 60_000L) { fired += it.id }
+        session.tick(nowElapsed + 45 * 60_000L + 1_000L) { fired += it.id }
+
+        assertEquals(listOf(1), fired)
+        assertNull(session.nextEventElapsedMs(nowElapsed + 45 * 60_000L + 1_000L))
+    }
+
+    @Test
+    fun intervalFiresLaunchCountTimesAtInterval() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val nowWall = epochUtc(2026, 9, 21, 10, 0, 0)
+        val nowElapsed = 500_000L
+        val ch = channel(
+            id = 2,
+            mode = SceneMode.INTERVAL,
+            startMinutes = 10 * 60 + 10,
+            intervalMs = 10_000L,
+            launchCount = 3,
+        )
+        val session = TimerSession()
+        session.start(config(listOf(ch)), nowElapsed, nowWall)
+        val fired = mutableListOf<Int>()
+        val first = nowElapsed + 10 * 60_000L
+
+        session.tick(first) { fired += it.id }
+        session.tick(first + 10_000L) { fired += it.id }
+        session.tick(first + 20_000L) { fired += it.id }
+        session.tick(first + 60_000L) { fired += it.id }
+
+        assertEquals(3, fired.size)
+        assertNull(session.nextEventElapsedMs(first + 60_000L))
+    }
+
+    @Test
+    fun repeatWithStartTimeFiresAtClockThenEveryInterval() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val nowWall = epochUtc(2026, 9, 21, 12, 0, 0)
+        val ch = channel(
+            id = 3,
+            mode = SceneMode.REPEAT,
+            startMinutes = 12 * 60 + 5,
+            intervalMs = 60_000L,
+        )
+        val session = TimerSession()
+        session.start(config(listOf(ch)), 0L, nowWall)
+        val fired = mutableListOf<Int>()
+
+        session.tick(4 * 60_000L) { fired += it.id }
+        session.tick(5 * 60_000L) { fired += it.id }
+        session.tick(6 * 60_000L) { fired += it.id }
+
+        assertEquals(listOf(3, 3), fired)
+        assertNotNull(session.nextEventElapsedMs(6 * 60_000L))
+    }
+
+    @Test
+    fun randomFixedAtStartSurvivesPauseResume() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val nowWall = epochUtc(2026, 9, 21, 9, 0, 0)
+        val ch = channel(
+            id = 4,
+            mode = SceneMode.RANDOM,
+            startMinutes = 600,
+            endMinutes = 610,
+            launchCount = 4,
+        )
+        val session = TimerSession()
+        session.start(config(listOf(ch)), 0L, nowWall)
+        val snapshot = session.nextEventElapsedMs(0L)
+
+        session.pause(1L)
+        session.resume(5_000L)
+
+        assertEquals(snapshot!! + (5_000L - 1L), session.nextEventElapsedMs(5_000L))
+    }
+
+    private fun epochUtc(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int): Long {
+        val calendar = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
+        calendar.clear()
+        calendar.set(year, month - 1, day, hour, minute, second)
+        return calendar.timeInMillis
     }
 
     // ---------------------------------------------------------------- formatHms

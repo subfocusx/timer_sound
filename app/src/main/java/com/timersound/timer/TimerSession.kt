@@ -2,21 +2,22 @@ package com.timersound.timer
 
 import android.os.SystemClock
 import com.timersound.model.ChannelConfig
+import com.timersound.model.SceneMode
 import com.timersound.model.TimerConfig
 
 /** Состояние машины состояний сессии таймера (I->R->P<->R->STOP/RESET/COMPLETED). */
 enum class TimerState { IDLE, RUNNING, PAUSED, COMPLETED }
 
 /**
- * Движок интервальной сессии. Единственный источник «что и когда звучит» —
- * реальное время (SystemClock.elapsedRealtime(), монотонное, переживает режимы сна);
- * UI лишь отображает состояние и шлёт команды.
+ * Движок сценарной сессии. Единственный источник «что и когда звучит» —
+ * монотонное elapsed-время; wall-время используется только при старте для
+ * привязки локальных HH:MM к elapsed-шкале.
  *
  * Машина состояний:
  *  IDLE --start--> RUNNING
  *  RUNNING --pause--> PAUSED --resume--> RUNNING
  *  RUNNING/PAUSED --stop--> IDLE
- *  RUNNING --tick(дедлайн авто-остановки)--> COMPLETED (всё остановлено)
+ *  RUNNING --tick(дедлайн авто-остановки или последний звук сценария)--> COMPLETED
  *  COMPLETED --reset--> IDLE
  */
 class TimerSession {
@@ -24,7 +25,10 @@ class TimerSession {
     private data class Scheduled(
         val config: ChannelConfig,
         var nextFireElapsedMs: Long,
+        /** Остаток до ближайшего события на момент паузы. */
         var remainingOnPauseMs: Long = 0L,
+        /** Будущие события конечного режима: абсолютные во время работы, относительные в паузе. */
+        var finiteRemaining: List<Long> = emptyList(),
     )
 
     var state: TimerState = TimerState.IDLE
@@ -39,12 +43,34 @@ class TimerSession {
     val isRunning: Boolean get() = state == TimerState.RUNNING
     val isActive: Boolean get() = state == TimerState.RUNNING || state == TimerState.PAUSED
 
-    /** Старт сессии: планируем первое срабатывание каждого канала через его интервал. */
-    fun start(config: TimerConfig, nowElapsedMs: Long = SystemClock.elapsedRealtime()) {
+    /** Старт сессии: фиксируем сценарные моменты и переводим их в elapsed-шкалу. */
+    fun start(
+        config: TimerConfig,
+        nowElapsedMs: Long = SystemClock.elapsedRealtime(),
+        nowWallMs: Long = System.currentTimeMillis(),
+    ) {
         scheduled.clear()
-        config.playableChannels().forEach { ch ->
-            scheduled += Scheduled(ch, nowElapsedMs + ch.intervalMs.coerceAtLeast(1_000L))
-        }
+        config.playableChannels()
+            .filter { it.scheduleValid }
+            .forEach { ch ->
+                val fires = SceneScheduler.fireTimesFor(ch, nowElapsedMs, nowWallMs)
+                if (ch.mode == SceneMode.REPEAT) {
+                    scheduled += Scheduled(
+                        config = ch,
+                        nextFireElapsedMs = SceneScheduler.initialRepeatFire(
+                            nowElapsedMs,
+                            nowWallMs,
+                            ch.startMinutes,
+                        ),
+                    )
+                } else if (fires.isNotEmpty()) {
+                    scheduled += Scheduled(
+                        config = ch,
+                        nextFireElapsedMs = fires.first(),
+                        finiteRemaining = fires.drop(1),
+                    )
+                }
+            }
         startedElapsedMs = nowElapsedMs
         autoStopDeadlineElapsedMs =
             if (config.autoStopMs > 0) nowElapsedMs + config.autoStopMs else Long.MAX_VALUE
@@ -54,17 +80,23 @@ class TimerSession {
     /** Пауза: запоминаем остатки до следующих срабатываний и до авто-остановки. */
     fun pause(nowElapsedMs: Long = SystemClock.elapsedRealtime()) {
         if (state != TimerState.RUNNING) return
-        scheduled.forEach { it.remainingOnPauseMs = (it.nextFireElapsedMs - nowElapsedMs).coerceAtLeast(0L) }
+        scheduled.forEach { s ->
+            s.remainingOnPauseMs = (s.nextFireElapsedMs - nowElapsedMs).coerceAtLeast(0L)
+            s.finiteRemaining = s.finiteRemaining.map { (it - nowElapsedMs).coerceAtLeast(0L) }
+        }
         remainingAutoStopOnPauseMs =
             if (autoStopDeadlineElapsedMs == Long.MAX_VALUE) Long.MAX_VALUE
             else (autoStopDeadlineElapsedMs - nowElapsedMs).coerceAtLeast(0L)
         state = TimerState.PAUSED
     }
 
-    /** Возобновление: перепланируем от текущего момента. */
+    /** Возобновление: переносим сохранённые остатки от текущего момента. */
     fun resume(nowElapsedMs: Long = SystemClock.elapsedRealtime()) {
         if (state != TimerState.PAUSED) return
-        scheduled.forEach { it.nextFireElapsedMs = nowElapsedMs + it.remainingOnPauseMs.coerceAtLeast(0L) }
+        scheduled.forEach { s ->
+            s.nextFireElapsedMs = nowElapsedMs + s.remainingOnPauseMs
+            s.finiteRemaining = s.finiteRemaining.map { nowElapsedMs + it }
+        }
         autoStopDeadlineElapsedMs =
             if (remainingAutoStopOnPauseMs == Long.MAX_VALUE) Long.MAX_VALUE
             else nowElapsedMs + remainingAutoStopOnPauseMs
@@ -81,6 +113,7 @@ class TimerSession {
 
     /** Принудительно отметить сессию завершённой (авто-остановка). */
     fun markCompleted() {
+        scheduled.clear()
         state = TimerState.COMPLETED
     }
 
@@ -94,8 +127,7 @@ class TimerSession {
 
     /**
      * Тик сессии, вызывается сервисом ~4 раза в секунду, пока RUNNING.
-     * Возвращает true, когда сработала авто-остановка (всё остановлено; вызыватель
-     * должен остановить аудио, обновить уведомление и остановить сервис).
+     * Возвращает true, когда сценарий завершён или сработала авто-остановка.
      */
     fun tick(
         nowElapsedMs: Long = SystemClock.elapsedRealtime(),
@@ -105,16 +137,30 @@ class TimerSession {
 
         // Авто-остановка: глобальная, останавливает всё.
         if (autoStopDeadlineElapsedMs != Long.MAX_VALUE && nowElapsedMs >= autoStopDeadlineElapsedMs) {
-            state = TimerState.COMPLETED
+            markCompleted()
             return true
         }
 
-        // Срабатывания каналов: каждый канал воспроизводится каждые свои интервалы.
-        scheduled.forEach { s ->
+        // Срабатывания каналов: каждый канал воспроизводится по своему сценарию.
+        scheduled.toList().forEach { s ->
             while (nowElapsedMs >= s.nextFireElapsedMs) {
                 trigger(s.config)
-                s.nextFireElapsedMs += s.config.intervalMs.coerceAtLeast(1_000L)
+                if (s.finiteRemaining.isNotEmpty()) {
+                    s.nextFireElapsedMs = s.finiteRemaining.first()
+                    s.finiteRemaining = s.finiteRemaining.drop(1)
+                } else if (s.config.mode == SceneMode.REPEAT) {
+                    s.nextFireElapsedMs += s.config.intervalMs.coerceAtLeast(1_000L)
+                } else {
+                    s.nextFireElapsedMs = Long.MAX_VALUE
+                    break
+                }
             }
+        }
+        scheduled.removeAll { it.nextFireElapsedMs == Long.MAX_VALUE && it.finiteRemaining.isEmpty() }
+
+        if (scheduled.isEmpty()) {
+            markCompleted()
+            return true
         }
         return false
     }
@@ -127,15 +173,23 @@ class TimerSession {
 
     /** Дата следующего звука для уведомления; null, если канал не запланирован. */
     fun nextFireForChannel(channelId: Int, nowElapsedMs: Long = SystemClock.elapsedRealtime()): Long? {
+        if (!isActive) return null
         return scheduled.firstOrNull { it.config.id == channelId }
             ?.let { s -> if (s.nextFireElapsedMs > nowElapsedMs) s.nextFireElapsedMs - nowElapsedMs else 0L }
     }
 
     /** Общий следующий звук (ближайший по времени) для строки уведомления. */
+    fun nextEventElapsedMs(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Long? {
+        if (!isActive) return null
+        return scheduled.minByOrNull { it.nextFireElapsedMs }?.nextFireElapsedMs
+    }
+
+    /** Общий следующий звук (ближайший по времени) для строки уведомления. */
     fun nextSoundDescription(nowElapsedMs: Long = SystemClock.elapsedRealtime()): String {
-        val next = scheduled.minByOrNull { it.nextFireElapsedMs } ?: return "—"
-        val remain = (next.nextFireElapsedMs - nowElapsedMs).coerceAtLeast(0L)
-        return "${next.config.name}: через ${formatHms(remain)}"
+        val next = nextEventElapsedMs(nowElapsedMs) ?: return "—"
+        val remain = (next - nowElapsedMs).coerceAtLeast(0L)
+        val channel = scheduled.minByOrNull { it.nextFireElapsedMs }?.config ?: return "—"
+        return "${channel.name}: через ${formatHms(remain)}"
     }
 
     companion object {
