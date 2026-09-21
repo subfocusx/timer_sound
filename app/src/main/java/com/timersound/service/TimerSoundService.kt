@@ -1,12 +1,15 @@
 package com.timersound.service
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -14,7 +17,9 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,7 +51,7 @@ import com.timersound.timer.TimerState
  */
 class TimerSoundService : Service() {
 
-    private enum class Command { START, PAUSE, RESUME, STOP, RESET }
+    private enum class Command { START, PAUSE, RESUME, STOP, RESET, TICK }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val commands = Channel<Command>(Channel.UNLIMITED)
@@ -54,6 +59,8 @@ class TimerSoundService : Service() {
     private lateinit var prefs: PreferencesRepository
     private var wakeLock: PowerManager.WakeLock? = null
     private var mediaSession: MediaSession? = null
+    private var alarmManager: AlarmManager? = null
+    private var usingExactAlarm = false
     private var tickJob: Job? = null
 
     override fun onCreate() {
@@ -61,6 +68,7 @@ class TimerSoundService : Service() {
         prefs = PreferencesRepository(this)
         createNotificationChannel()
         TimerStateHolder.reset()
+        alarmManager = runCatching { getSystemService(Context.ALARM_SERVICE) as AlarmManager }.getOrNull()
         startCommandConsumer()
     }
 
@@ -73,6 +81,7 @@ class TimerSoundService : Service() {
             ACTION_RESUME -> commands.trySend(Command.RESUME)
             ACTION_STOP -> commands.trySend(Command.STOP)
             ACTION_RESET -> commands.trySend(Command.RESET)
+            ACTION_TICK -> commands.trySend(Command.TICK)
         }
         return START_NOT_STICKY
     }
@@ -95,6 +104,7 @@ class TimerSoundService : Service() {
             Command.RESUME -> handleResume()
             Command.STOP -> handleStop(completed = false)
             Command.RESET -> handleReset()
+            Command.TICK -> onAlarmTick()
         }
     }
 
@@ -107,15 +117,23 @@ class TimerSoundService : Service() {
             }
             AudioEngine.releaseAll()
             session.start(config)
+            Log.i(TAG, "handleStart: playableTasks=${config.playableChannels().size}, nextEvent=${session.nextEventElapsedMs()}")
             acquireWakeLock()
             setupMediaSession(playing = true)
             startAsForeground()
+            val autoStopped = handleTick()
+            if (autoStopped) {
+                handleAutoStop()
+                return@launch
+            }
             startTickLoop()
+            scheduleExactAlarm()
         }
     }
 
     private fun handlePause() {
         session.pause()
+        cancelExactAlarm()
         releaseWakeLock()
         updateMediaSession(playing = false)
         refreshNotification()
@@ -124,12 +142,14 @@ class TimerSoundService : Service() {
 
     private fun handleResume() {
         session.resume()
+        scheduleExactAlarm()
         acquireWakeLock()
         updateMediaSession(playing = true)
         publishUiSnapshot()
     }
 
     private fun handleReset() {
+        cancelExactAlarm()
         session.reset()
         TimerStateHolder.reset()
         if (!session.isActive) {
@@ -140,6 +160,7 @@ class TimerSoundService : Service() {
 
     /** STOP / завершение: освобождает аудио, снимает FGS, останавливает сервис. */
     private fun handleStop(completed: Boolean) {
+        cancelExactAlarm()
         stopTickLoop()
         AudioEngine.releaseAll()
         session.stop()
@@ -157,6 +178,8 @@ class TimerSoundService : Service() {
 
     /** Авто-остановка из тик-цикла: вызывается после того, как старт завершён. */
     private fun handleAutoStop() {
+        stopTickLoop()
+        cancelExactAlarm()
         publishUiSnapshot(stateOverride = TimerState.COMPLETED)
         handleStop(completed = true)
     }
@@ -170,7 +193,13 @@ class TimerSoundService : Service() {
             while (isActive) {
                 val now = SystemClock.elapsedRealtime()
                 val autoStopped: Boolean = if (session.isRunning) {
-                    session.tick(now) { channel -> AudioEngine.play(applicationContext, channel) }
+                    val autoStopDeadline = session.countdownToAutoStopMs(now)
+                    if (autoStopDeadline != null && autoStopDeadline <= 0L) {
+                        true
+                    } else {
+                        handleTick(now)
+                        false
+                    }
                 } else {
                     false
                 }
@@ -192,6 +221,77 @@ class TimerSoundService : Service() {
     private fun stopTickLoop() {
         tickJob?.cancel()
         tickJob = null
+    }
+
+    private fun handleTick(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Boolean {
+        val nextEvent = session.nextEventElapsedMs(nowElapsedMs)
+        val wall = System.currentTimeMillis()
+        Log.i(TAG, "tick alarmFired=false state=${session.state} nextEventElapsedMs=$nextEvent wall=$wall")
+        var fired = false
+        session.tick(nowElapsedMs) { channel ->
+            fired = true
+            Log.i(TAG, "tick alarmFired=true state=${session.state} nextEventElapsedMs=${session.nextEventElapsedMs(nowElapsedMs)} wall=${System.currentTimeMillis()}")
+            AudioEngine.play(applicationContext, channel)
+        }
+        return fired || session.state == TimerState.COMPLETED
+    }
+
+    private fun onAlarmTick() {
+        if (session.state != TimerState.RUNNING) return
+        Log.i(TAG, "alarmFired=true state=${session.state} nextEventElapsedMs=${session.nextEventElapsedMs()} wall=${System.currentTimeMillis()}")
+        handleTick()
+        if (session.state == TimerState.COMPLETED) {
+            handleAutoStop()
+        } else {
+            scheduleExactAlarm()
+        }
+    }
+
+    private fun scheduleExactAlarm() {
+        val manager = alarmManager
+        if (manager == null || session.state != TimerState.RUNNING || !canScheduleExactAlarm()) {
+            usingExactAlarm = false
+            return
+        }
+
+        val nextEvent = session.nextEventElapsedMs() ?: return
+        val delayMs = (nextEvent - SystemClock.elapsedRealtime()).coerceAtLeast(1_000L)
+        val triggerAtWallMs = System.currentTimeMillis() + delayMs
+        val pending = exactAlarmPendingIntent()
+
+        try {
+            manager.cancel(pending)
+            manager.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAtWallMs, null), pending)
+            usingExactAlarm = true
+            Log.i(TAG, "alarmScheduled=true state=${session.state} nextEventElapsedMs=$nextEvent delayMs=$delayMs wall=$triggerAtWallMs")
+        } catch (error: SecurityException) {
+            usingExactAlarm = false
+            Log.w(TAG, "exact alarm denied: ${error.message}")
+        } catch (error: Exception) {
+            usingExactAlarm = false
+            Log.w(TAG, "exact alarm scheduling failed: ${error.message}")
+        }
+    }
+
+    private fun exactAlarmPendingIntent(): PendingIntent =
+        PendingIntent.getService(
+            this,
+            ALARM_TICK_REQUEST_CODE,
+            commandIntent(this, ACTION_TICK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+    private fun cancelExactAlarm() {
+        if (!usingExactAlarm) return
+        alarmManager?.cancel(exactAlarmPendingIntent())
+        usingExactAlarm = false
+        Log.i(TAG, "exactAlarmCancelled=true")
+    }
+
+    private fun canScheduleExactAlarm(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SCHEDULE_EXACT_ALARM) != PackageManager.PERMISSION_GRANTED) return false
+        return alarmManager?.canScheduleExactAlarms() == true
     }
 
     // ------------------------------------------------------------------ notification
@@ -344,6 +444,7 @@ class TimerSoundService : Service() {
     // ------------------------------------------------------------------ lifecycle
 
     override fun onDestroy() {
+        cancelExactAlarm()
         stopTickLoop()
         AudioEngine.releaseAll()
         releaseWakeLock()
@@ -357,11 +458,14 @@ class TimerSoundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        private const val TAG = "TimerSound"
         const val ACTION_START = "com.timersound.intent.START"
         const val ACTION_PAUSE = "com.timersound.intent.PAUSE"
         const val ACTION_RESUME = "com.timersound.intent.RESUME"
         const val ACTION_STOP = "com.timersound.intent.STOP"
         const val ACTION_RESET = "com.timersound.intent.RESET"
+        const val ACTION_TICK = "com.timersound.intent.TICK"
+        private const val ALARM_TICK_REQUEST_CODE = 4001
         const val NOTIFICATION_ID = 1001
         const val COMPLETED_NOTIFICATION_ID = 1002
         const val CHANNEL_ID = "timer_running"
