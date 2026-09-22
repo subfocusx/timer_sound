@@ -422,7 +422,10 @@ class TimerSoundService : Service() {
         if (wakeLock?.isHeld == true) return
         wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "com.timersound:timer")
-            .apply { acquire() }
+            .apply { 
+                setReferenceCounted(false) // Защита от утечки при повторных acquire/release
+                acquire(10 * 60 * 1000L) // Timeout 10 минут для защиты от вечной блокировки
+            }
     }
 
     private fun releaseWakeLock() {

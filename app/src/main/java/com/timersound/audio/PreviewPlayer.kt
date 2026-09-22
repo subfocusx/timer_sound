@@ -173,4 +173,31 @@ object PreviewPlayer {
     fun release() {
         stop()
     }
+
+    /** Запустить ticker только если состояние изменилось — оптимизация обновлений StateFlow. */
+    private fun startTicker() {
+        stopTicker()
+        var lastPosition: Long = -1
+        var lastIsPlaying: Boolean = false
+        tickerJob = scope.launch {
+            while (isActive) {
+                delay(250)
+                val p = player ?: return@launch
+                val id = currentAlarmId ?: return@launch
+                val newPosition = p.currentPosition
+                val newIsPlaying = p.isPlaying
+                // Обновляем StateFlow только при изменении состояния
+                if (newPosition != lastPosition || newIsPlaying != lastIsPlaying) {
+                    _state.value = State(
+                        alarmId = id,
+                        isPlaying = newIsPlaying,
+                        positionMs = newPosition,
+                        durationMs = p.duration,
+                    )
+                    lastPosition = newPosition
+                    lastIsPlaying = newIsPlaying
+                }
+            }
+        }
+    }
 }

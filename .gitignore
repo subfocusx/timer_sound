@@ -1,25 +1,51 @@
+```
+# Environment specific
+local.properties
+
 # Gradle
 .gradle/
 build/
-gradle-*/
-!gradle/wrapper
+!gradle-wrapper.properties
 
-# Android / IDE
+# IDE
 .idea/
 *.iml
+*.ipr
+*.iws
 .vscode/
-*.code-workspace
 
-# Kotlin
-.kotlin/
-
-# Local env
-local.properties
+# Temp files
+*.tmp
+*.temp
+*.log
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
+# Dependencies
+node_modules/
+vendor/
 
+# Python (if applicable)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.gitattributes
+!.gitkeep
+```

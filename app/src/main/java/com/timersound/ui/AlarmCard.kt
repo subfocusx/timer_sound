@@ -339,17 +339,38 @@ fun DurationField(valueMs: Long, onChange: (Long) -> Unit, label: String) {
 @Composable
 fun TimeField(value: Int?, onChange: (Int?) -> Unit, label: String) {
     var text by remember(value) { mutableStateOf(value?.let(::formatMinutes) ?: "") }
+    
+    // Синхронизация при изменении внешнего значения
+    LaunchedEffect(value) {
+        val expected = value?.let(::formatMinutes) ?: ""
+        if (text != expected) {
+            text = expected
+        }
+    }
+    
     OutlinedTextField(
         value = text,
         onValueChange = { raw ->
-            val cleaned = raw.filter { it.isDigit() || it == ':' }.take(5)
-            text = cleaned
-            onChange(parseHm(cleaned))
+            // Удаляем всё кроме цифр, ограничиваем 4 символами
+            val digits = raw.filter { it.isDigit() }.take(4)
+            
+            // Форматируем с автоматической вставкой ":" после двух цифр
+            val formatted = if (digits.length > 2) {
+                "${digits.take(2)}:${digits.drop(2)}"
+            } else {
+                digits
+            }
+            
+            text = formatted
+            onChange(parseHm(formatted))
         },
         singleLine = true,
         isError = text.isNotEmpty() && parseHm(text) == null,
         label = { Text(label) },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        supportingText = {
+            Text("Вводите только цифры, : добавится автоматически (930 → 09:30)")
+        },
     )
 }
 

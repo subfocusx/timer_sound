@@ -52,7 +52,8 @@ class SceneSchedulerTest {
 
     @Test
     fun initialRepeatFireIsImmediateWithoutStartTime() {
-        assertEquals(7_000L, SceneScheduler.initialRepeatFire(7_000L, 0L, null))
+        // Режим REPEAT без времени начала должен начинать воспроизведение через 500ms после старта
+        assertEquals(7_500L, SceneScheduler.initialRepeatFire(7_000L, 0L, null))
     }
 
     @Test
@@ -131,6 +132,20 @@ class SceneSchedulerTest {
         assertEquals(5, minutes.size)
         assertEquals(minutes.toSet().size, minutes.size)
         minutes.forEach { assertTrue(it in 0 until 30) }
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun randomMinutesThrowsOnImpossibleParameters() {
+        // Попытка получить 100 уникальных значений в диапазоне 10 должна выбросить исключение
+        SceneScheduler.randomMinutes(10, 100, seed = 42L)
+    }
+
+    @Test
+    fun randomMinutesHandlesZeroSpanGracefully() {
+        // При span=0 должен использоваться coerceAtLeast(1) и вернуть одно значение 0
+        val minutes = SceneScheduler.randomMinutes(0, 1, seed = 42L)
+        assertEquals(1, minutes.size)
+        assertEquals(0, minutes[0])
     }
 
     private fun alarm(
