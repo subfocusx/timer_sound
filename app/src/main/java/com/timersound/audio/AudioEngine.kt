@@ -7,7 +7,7 @@ import android.media.RingtoneManager
 import android.net.Uri
 import android.util.Log
 import com.timersound.R
-import com.timersound.model.ChannelConfig
+import com.timersound.model.AlarmConfig
 
 /**
  * Audio engine: one independent [Ringtone] per channel - timers ring through the
@@ -27,8 +27,11 @@ object AudioEngine {
 
     private const val TAG = "TimerSound"
 
-    /** Session channel players (key = channel id) and preview players. */
-    private val players = mutableMapOf<Int, Ringtone>()
+    /** Максимум одновременных Ringtone (D-1). При превышении — стоп самых старых. */
+    const val MAX_CONCURRENT_RINGS = 10
+
+    /** Session channel players (key = channel id). LinkedHashMap для FIFO (стоп самых старых). */
+    private val players = LinkedHashMap<Int, Ringtone>()
     private val previewPlayers = mutableMapOf<Int, Ringtone>()
     private val lock = Any()
 
@@ -36,34 +39,40 @@ object AudioEngine {
      * Ring channel signal once (interval fire). If the channel is still sounding
      * from the previous interval - the ringtone is stopped and re-created.
      */
-    fun play(context: Context, channel: ChannelConfig) {
+    fun play(context: Context, alarm: AlarmConfig) {
         synchronized(lock) {
             try {
-                val ring = createRingtone(context, channel)
+                val ring = createRingtone(context, alarm)
                 if (ring == null) {
-                    Log.w(TAG, "AudioEngine.play: NO ringtone ch=${channel.id} uri=${channel.fileUri} - aborted")
+                    Log.w(TAG, "AudioEngine.play: NO ringtone ch=${alarm.id} uri=${alarm.fileUri} - aborted")
                     return
                 }
-                players.remove(channel.id)?.let { runCatching { it.stop() } }
-                ring.setVolume(channel.volumePercent / 100f)
-                players[channel.id] = ring
-                Log.i(TAG, "AudioEngine.play: calling ring.play() ch=${channel.id} uri=${channel.fileUri}")
+                players.remove(alarm.id)?.let { runCatching { it.stop() } }
+                // MAX_CONCURRENT_RINGS: стоп самых старых если лимит достигнут.
+                while (players.size >= MAX_CONCURRENT_RINGS) {
+                    val oldestId = players.entries.first().key
+                    Log.w(TAG, "MAX_CONCURRENT_RINGS=$MAX_CONCURRENT_RINGS: стоп самого старого id=$oldestId")
+                    players.remove(oldestId)?.let { runCatching { it.stop() } }
+                }
+                ring.setVolume(alarm.volumePercent / 100f)
+                players[alarm.id] = ring
+                Log.i(TAG, "AudioEngine.play: calling ring.play() ch=${alarm.id} uri=${alarm.fileUri}")
                 ring.play()
-                Log.i(TAG, "AudioEngine.play: returned OK ch=${channel.id}")
+                Log.i(TAG, "AudioEngine.play: returned OK ch=${alarm.id}")
             } catch (e: Exception) {
-                Log.e(TAG, "AudioEngine.play: EXCEPTION ch=${channel.id} uri=${channel.fileUri}: ${e}", e)
+                Log.e(TAG, "AudioEngine.play: EXCEPTION ch=${alarm.id} uri=${alarm.fileUri}: ${e}", e)
             }
         }
     }
 
     /** One-shot preview of a channel signal (not tied to the timer session). */
-    fun preview(context: Context, channel: ChannelConfig) {
+    fun preview(context: Context, alarm: AlarmConfig) {
         synchronized(lock) {
             try {
-                val ring = createRingtone(context, channel) ?: return
-                previewPlayers.remove(channel.id)?.let { runCatching { it.stop() } }
-                ring.setVolume(channel.volumePercent / 100f)
-                previewPlayers[channel.id] = ring
+                val ring = createRingtone(context, alarm) ?: return
+                previewPlayers.remove(alarm.id)?.let { runCatching { it.stop() } }
+                ring.setVolume(alarm.volumePercent / 100f)
+                previewPlayers[alarm.id] = ring
                 ring.play()
             } catch (_: Exception) {
             }
@@ -88,17 +97,17 @@ object AudioEngine {
         }
     }
 
-    private fun createRingtone(context: Context, channel: ChannelConfig): Ringtone? {
-        val uriStr = if (channel.isBuiltInBeep) {
+    private fun createRingtone(context: Context, alarm: AlarmConfig): Ringtone? {
+        val uriStr = if (alarm.isBuiltInBeep) {
             "android.resource://${context.packageName}/${R.raw.beep}"
         } else {
-            channel.fileUri
+            alarm.fileUri
         }
-        Log.i(TAG, "AudioEngine.createRingtone: ch=${channel.id} uri=$uriStr")
+        Log.i(TAG, "AudioEngine.createRingtone: ch=${alarm.id} uri=$uriStr")
         return try {
             val uri = Uri.parse(uriStr)
             val ring = RingtoneManager.getRingtone(context, uri)
-            Log.i(TAG, "AudioEngine.getRingtone: OK ch=${channel.id} ring=$ring")
+            Log.i(TAG, "AudioEngine.getRingtone: OK ch=${alarm.id} ring=$ring")
             ring.setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -107,7 +116,7 @@ object AudioEngine {
             )
             ring
         } catch (e: Exception) {
-            Log.e(TAG, "AudioEngine.getRingtone: FAILED ch=${channel.id} uri=$uriStr: ${e}", e)
+            Log.e(TAG, "AudioEngine.getRingtone: FAILED ch=${alarm.id} uri=$uriStr: ${e}", e)
             null
         }
     }

@@ -1,6 +1,6 @@
 package com.timersound.timer
 
-import com.timersound.model.ChannelConfig
+import com.timersound.model.AlarmConfig
 import com.timersound.model.SceneMode
 import java.util.Calendar
 import java.util.Random
@@ -36,20 +36,20 @@ object SceneScheduler {
         if (startMinutes == null) nowElapsedMs else nextClockElapsed(nowElapsedMs, nowWallMs, startMinutes)
 
     /** Моменты конечных режимов (ONCE/INTERVAL/RANDOM), по возрастанию. REPEAT -> пустой. */
-    fun fireTimesFor(channel: ChannelConfig, nowElapsedMs: Long, nowWallMs: Long): List<Long> {
-        when (channel.mode) {
-            SceneMode.ONCE_TIME -> return listOf(nextClockElapsed(nowElapsedMs, nowWallMs, requireStart(channel)))
+    fun fireTimesFor(alarm: AlarmConfig, nowElapsedMs: Long, nowWallMs: Long): List<Long> {
+        when (alarm.mode) {
+            SceneMode.ONCE_TIME -> return listOf(nextClockElapsed(nowElapsedMs, nowWallMs, requireStart(alarm)))
             SceneMode.INTERVAL -> {
-                val first = nextClockElapsed(nowElapsedMs, nowWallMs, requireStart(channel))
-                val count = channel.launchCount.coerceAtLeast(1)
-                val step = channel.intervalMs.coerceAtLeast(1_000L)
+                val first = nextClockElapsed(nowElapsedMs, nowWallMs, requireStart(alarm))
+                val count = alarm.launchCount.coerceAtLeast(1)
+                val step = alarm.intervalMs.coerceAtLeast(1_000L)
                 return (0 until count).map { first + it.toLong() * step }
             }
             SceneMode.RANDOM -> {
-                val start = requireStart(channel)
-                val end = requireEnd(channel)
+                val start = requireStart(alarm)
+                val end = requireEnd(alarm)
                 val span = end - start
-                val count = channel.launchCount.coerceIn(1, span)
+                val count = alarm.launchCount.coerceIn(1, span)
                 val dayStartWall = localMidnightWall(nowWallMs)
                 val windowStartWall = dayStartWall + start.toLong() * MS_PER_MIN
                 val originWall = if (windowStartWall > nowWallMs) windowStartWall else windowStartWall + MS_PER_DAY
@@ -68,9 +68,9 @@ object SceneScheduler {
         return picked.toMutableList()
     }
 
-    private fun requireStart(channel: ChannelConfig): Int =
-        channel.startMinutes ?: throw IllegalArgumentException("startMinutes required for ${channel.mode}")
+    private fun requireStart(alarm: AlarmConfig): Int =
+        alarm.startMinutes ?: throw IllegalArgumentException("startMinutes required for ${alarm.mode}")
 
-    private fun requireEnd(channel: ChannelConfig): Int =
-        channel.endMinutes ?: throw IllegalArgumentException("endMinutes required for RANDOM")
+    private fun requireEnd(alarm: AlarmConfig): Int =
+        alarm.endMinutes ?: throw IllegalArgumentException("endMinutes required for RANDOM")
 }

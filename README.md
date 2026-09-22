@@ -8,14 +8,21 @@ Kotlin + Jetpack Compose (Material 3) + Android Foreground Service.
 
 ## Возможности
 
-- **Динамический список звуковых сценариев** (неограниченное количество, добавление/удаление на лету), у каждого:
+- **Динамический список до 100 будильников**: добавление, удаление одного, удаление всех.
+  Лимит — 100. Имена персистят, id стабильны и не переиспользуются.
+  У каждого будильника:
   - свой аудиофайл (MP3 / WAV / OGG через системный файловый пикер, права на чтение — persistable, файлы не копируются);
   - свой интервал `ЧЧ:ММ:СС` (пресеты 1/3/5/10/15/30 мин);
   - своя громкость 0–100 %;
   - переключатель ВКЛ/ВЫКЛ;
+  - режим сценария (Повтор / Один раз / N раз / Случайно) с режим-специфичными полями;
   - предпросмотр, замена и удаление файла.
-- **Первый сценарий по умолчанию** содержит встроенный тестовый сигнал (`res/raw/beep.wav`),
-  остальные сценарии пустые — файл выбирается вручную.
+- **Карточка-плеер** в каждом будильнике: `PreviewPlayer` (ExoPlayer) с play/pause,
+  прогрессом и временем. Ровно один preview на процесс; запуск второго останавливает первый.
+- **Первый будильник по умолчанию** содержит встроенный тестовый сигнал (`res/raw/beep.wav`),
+  остальные пустые — файл выбирается вручную.
+- **Блокировка правок**: при `RUNNING`/`PAUSED` все контролы будильников неактивны,
+  `+`/`×`/«Удалить все» дизейблены, показывается баннер блокировки.
 - **Параллельное воспроизведение**: каждый сценарий играет своим `Ringtone`
   одновременно (без последовательной очереди).
 - **Имена выбранных файлов сохраняются** (§11): рядом с URI в настройках
@@ -59,13 +66,14 @@ COMPLETED --Старт/Сброс--> RUNNING/IDLE
 
 | Слой | Файл | Ответственность |
 |---|---|---|
-| UI (Compose) | `ui/App.kt`, `ui/Theme.kt`, `MainActivity.kt` | Единственный экран: статус, выбор вывода звука, авто-остановка, карточки сценариев (динамический список). Только отображает состояние и шлёт команды. |
-| ViewModel | `TimerViewModel.kt` | Владелец конфигурации (DataStore), команды сервису, предпросмотр, выбор файла (`takePersistableUriPermission`). |
+| UI (Compose) | `ui/App.kt`, `ui/Theme.kt`, `ui/AlarmCard.kt`, `ui/ConfirmDialogs.kt`, `MainActivity.kt` | Единственный экран: TopAppBar, статус, авто-остановка, свёрнутые/раскрытые карточки будильников, FAB, пустой стейт, диалоги подтверждения. |
+| ViewModel | `TimerViewModel.kt` | Владелец конфигурации (DataStore + JSON), все мутации по id, add/delete/rename, блокировка правок (Р-5), previewState, snackbarEvents, debounce. |
+| Preview player | `audio/PreviewPlayer.kt` | ExoPlayer preview в карточках: play/pause/resume/stop/release, StateFlow<State>, ровно один preview на процесс, ticker 250 мс. |
+| AudioManager | `audio/AudioEngine.kt` | По одному `Ringtone` на сценарий (срабатывания таймера), MAX_CONCURRENT_RINGS=10, stopChannel, releaseAll. |
 | Timer-session | `timer/TimerSession.kt` | Движок расписаний (REPEAT / ONCE_TIME / INTERVAL / RANDOM): планирование срабатываний по `elapsedRealtime`, пауза/резюме без «протухания» моментов, авто-остановка. UI не является источником истины. |
 | SceneScheduler | `timer/SceneScheduler.kt` | Чистая математика расписаний без Android: «стенные» минуты → elapsed-шкала, моменты серии для каждого режима. |
-| Foreground Service | `service/TimerSoundService.kt` | Жизненный цикл сессии, FGS + уведомление с кнопками, тик-цикл, AlarmManager.setAlarmClock, MediaSession, wakelock. |
-| AudioManager | `audio/AudioEngine.kt` | По одному `Ringtone` на сценарий в потоке MEDIA (параллельное воспроизведение, громкость), предпросмотр, гарантированный `releaseAll()` на стоп. |
-| Preferences | `data/PreferencesRepository.kt` | DataStore Preferences: интервалы, громкости, включённость, URI файлов, имена файлов (§11), авто-остановка. |
+| Foreground Service | `service/TimerSoundService.kt` | Жизненный цикл сессии, FGS + уведомление с кнопками, тик-цикл, AlarmManager.setAlarmClock, MediaSession, wakelock. PreviewPlayer.stop() при старте сессии. |
+| Preferences | `data/PreferencesRepository.kt` | DataStore + JSON (`alarms_json`): сценарии (alarms), schema_version, next_alarm_id, авто-остановка. Миграция v1→v2 (legacy ch{i}_* → alarms). |
 | Мост сервис→UI | `service/TimerStateHolder.kt` | In-process `StateFlow`: сервис пишет, UI читает. |
 | Тесты | `test/.../{timer/TimerSessionTest, timer/SceneSchedulerTest, data/PreferencesRepositoryTest, model/TimerConfigTest}.kt` | Юнит-тесты машины состояний, расписаний, настроек и валидации конфига на чистой логике, с явными значениями времени. |
 
@@ -147,13 +155,24 @@ AGP 9.4.0 + Kotlin 2.4.20 (плагин `org.jetbrains.kotlin.plugin.compose`,
 ```
 
 Текущее покрытие — 41 тест: `TimerSessionTest` (21), `SceneSchedulerTest` (10),
-`PreferencesRepositoryTest` (6), `TimerConfigTest` (4). Остальные слои
+`PreferencesRepositoryTest` (6), `TimerConfigTest` (4). `TimerViewModelTest`
+планируется (зависит от Robolectric/Android-эмулятора). Остальные слои
 (Service, AudioEngine, UI) юнит-тестами не покрыты и проверяются вручную на
 устройстве (см. ниже).
 
 `TimerSession` спроектирован без Android-зависимостей (время передаётся
 явным параметром `nowElapsedMs`), поэтому машина состояний и автопланирование
 покрыты обычными юнит-тестами без эмулятора.
+
+Тесты покрывают:
+- Модель: `AlarmConfig` (scheduleValid, playableAlarms, missingFileAlarms, invalidScheduleAlarms)
+- Хранилище: JSON round-trip (1 и 100 будильников), ignoreUnknownKeys,
+  миграция legacy 5→5, channel_count=0→пустой, next_alarm_id uniqueness
+- TimerSession: все режимы, пауза/резюме, авто-остановка, finite series, форматирование
+- SceneScheduler: wall→elapsed, all modes, deterministic random
+
+Для обновления покрытия: `./gradlew test --rerun-tasks`.
+См. `TEST_COVERAGE_PERCENTAGE.md` для деталей.
 
 ## Ручной план проверки (критерии готовности ТЗ §18)
 

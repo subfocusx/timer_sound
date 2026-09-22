@@ -7,60 +7,89 @@ import android.provider.OpenableColumns
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
 import com.timersound.audio.AudioEngine
+import com.timersound.audio.PreviewPlayer
 import com.timersound.data.PreferencesRepository
-import com.timersound.model.ChannelConfig
+import com.timersound.model.AlarmConfig
 import com.timersound.model.Defaults
 import com.timersound.model.SceneMode
 import com.timersound.model.TimerConfig
 import com.timersound.service.TimerSoundService
 import com.timersound.service.TimerStateHolder
+import com.timersound.timer.TimerState
 
 /**
  * ViewModel: единственный владелец конфигурации (читает/пишет DataStore,
  * конфигурация — источник истины для UI), отправляет команды сервису и
  * транслирует его состояние (TimerStateHolder) в UI.
+ *
+ * Все мутации — по стабильному id. Блокировка правок при RUNNING/PAUSED
+ * (Р-5): ранний выход + UI-сигнал в snackbarEvents.
  */
 class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repo = PreferencesRepository(application)
 
-    private val _configMode = MutableStateFlow(Defaults.defaultConfig())
+    private val _configMode = MutableStateFlow(Defaults.firstRunConfig())
 
-    /** Текущая конфигурация каналов и авто-остановки (персист, без сети). */
+    /** Текущая конфигурация будильников и авто-остановки (персист, без сети). */
     val configMode: StateFlow<TimerConfig> = _configMode.asStateFlow()
     val config: StateFlow<TimerConfig> = configMode
 
+    /** Состояние выполнения сессии из сервиса. */
+    val runtime: StateFlow<TimerStateHolder.Ui> = TimerStateHolder.ui
+
+    /**
+     * Правки разрешены только в IDLE/COMPLETED.
+     * UI дизейбит контролы на основе этого флоу (защита в глубину).
+     */
+    val canEdit: StateFlow<Boolean> = runtime
+        .map { it.state == TimerState.IDLE || it.state == TimerState.COMPLETED }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** Разовые UI-события (Snackbar-сообщения). */
+    private val _snackbarEvents = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val snackbarEvents = _snackbarEvents.asSharedFlow()
+
+    /** Состояние превью-плеера (одна активная дорожка). */
+    val previewState: StateFlow<PreviewPlayer.State?> = PreviewPlayer.state
+
+    // ------------------------------------------------------------------ init
+
     init {
         viewModelScope.launch {
+            repo.ensureMigrated()
             repo.config.collect { _configMode.value = it }
         }
     }
-
-    /** Состояние выполнения сессии из сервиса. */
-    val runtime: StateFlow<TimerStateHolder.Ui> = TimerStateHolder.ui
 
     // ------------------------------------------------------------------ commands
 
     fun start() {
         val c = config.value
-        if (c.missingFileChannels().isNotEmpty() || c.playableChannels().isEmpty()) return
+        if (c.missingFileAlarms().isNotEmpty() || c.playableAlarms().isEmpty()) return
+        PreviewPlayer.stop()
         viewModelScope.launch {
             repo.save(c)
             ContextCompat.startForegroundService(
-                getApplication(), TimerSoundService.commandIntent(getApplication(), TimerSoundService.ACTION_START),
+                getApplication(),
+                TimerSoundService.commandIntent(getApplication(), TimerSoundService.ACTION_START),
             )
         }
     }
 
     fun pause() = send(TimerSoundService.ACTION_PAUSE)
-
     fun resume() = send(TimerSoundService.ACTION_RESUME)
-
     fun stop() = send(TimerSoundService.ACTION_STOP)
 
     fun reset() {
@@ -68,130 +97,228 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         send(TimerSoundService.ACTION_RESET)
     }
 
-    fun preview(channelId: Int) {
-        val ch = config.value.channels.firstOrNull { it.id == channelId } ?: return
-        if (!ch.hasFile) return
-        AudioEngine.preview(getApplication(), ch)
+    // ------------------------------------------------------------------ player
+
+    /** Play/pause toggle для карточки: ровно один preview на процесс. */
+    fun playerToggle(id: Int) {
+        val alarm = config.value.alarms.firstOrNull { it.id == id } ?: return
+        if (!alarm.hasFile) return
+        if (previewState.value?.alarmId == id && previewState.value?.isPlaying == true) {
+            PreviewPlayer.pause()
+        } else {
+            PreviewPlayer.play(getApplication(), alarm)
+        }
     }
 
-    private fun send(action: String) {
-        val ctx = getApplication<Application>()
-        ctx.startService(TimerSoundService.commandIntent(ctx, action))
+    fun playerStop() = PreviewPlayer.stop()
+
+    // ------------------------------------------------------------------ config edits (all by id, locked during session)
+
+    private val editingLocked get() =
+        runtime.value.state == TimerState.RUNNING || runtime.value.state == TimerState.PAUSED
+
+    private fun refuseEdit() {
+        viewModelScope.launch {
+            _snackbarEvents.emit("Остановите таймер, чтобы менять будильники")
+        }
     }
 
-    // ------------------------------------------------------------------ config edits
-
-    /** Выбран файл для канала: фиксируем persistable read-права, сохраняем URI и имя файла. */
-    fun onFilePicked(channelId: Int, uri: Uri) {
+    /** Выбран файл для будильника: фиксируем persistable read-права, сохраняем URI и имя. */
+    fun onFilePicked(id: Int, uri: Uri) {
+        if (editingLocked) { refuseEdit(); return }
         val ctx = getApplication<Application>()
         runCatching {
-            ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            ctx.contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
         }
         val displayName = queryDisplayName(uri)
         update { cfg ->
-            cfg.copy(channels = cfg.channels.map { ch ->
-                if (ch.id == channelId) ch.copy(fileUri = uri.toString(), fileName = displayName, enabled = ch.enabled) else ch
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(
+                    fileUri = uri.toString(), fileName = displayName, enabled = true,
+                ) else ch
             })
         }
     }
 
-    /** Удаление файла: канал 1 возвращается ко встроенному сигналу, остальные — пусто. */
-    fun removeFile(channelId: Int) {
+    /** Удаление файла: просто пустой fileUri, без спецслучая id == 0. */
+    fun removeFile(id: Int) {
+        if (editingLocked) { refuseEdit(); return }
+        AudioEngine.stopChannel(id)
+        releaseAlarmPermission(id)
         update { cfg ->
-            cfg.copy(channels = cfg.channels.map { ch ->
-                if (ch.id == channelId) ch.copy(
-                    fileUri = if (ch.id == 0) Defaults.BUILT_IN_BEEP else "",
-                    fileName = null,
-                )
-                else ch
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(fileUri = "", fileName = null) else ch
             })
         }
     }
 
-    fun setMode(index: Int, mode: SceneMode) {
-        updateConfig(index) { it.copy(mode = mode) }
+    /** Добавить будильник (лимит MAX_ALARMS). */
+    fun addAlarm() {
+        if (editingLocked) { refuseEdit(); return }
+        val current = _configMode.value
+        if (current.alarms.size >= Defaults.MAX_ALARMS) {
+            viewModelScope.launch {
+                _snackbarEvents.emit("Достигнут лимит ${Defaults.MAX_ALARMS} будильников")
+            }
+            return
+        }
+        val newId = current.alarms.maxOfOrNull { it.id }?.let { it + 1 } ?: 0
+        val newAlarm = Defaults.newAlarm(newId, current.alarms.size)
+        update { cfg -> cfg.copy(alarms = cfg.alarms + newAlarm) }
     }
 
-    fun setStartMinutes(index: Int, minutes: Int?) {
-        updateConfig(index) { it.copy(startMinutes = minutes) }
+    /** Удалить будильник по id + стоп preview/Ringtone + release SAF. */
+    fun deleteAlarm(id: Int) {
+        if (editingLocked) { refuseEdit(); return }
+        AudioEngine.stopChannel(id)
+        releaseAlarmPermission(id)
+        update { cfg -> cfg.copy(alarms = cfg.alarms.filter { it.id != id }) }
     }
 
-    fun setEndMinutes(index: Int, minutes: Int?) {
-        updateConfig(index) { it.copy(endMinutes = minutes) }
+    /** Удалить все будильники + releaseAll(). */
+    fun deleteAllAlarms() {
+        if (editingLocked) { refuseEdit(); return }
+        AudioEngine.releaseAll()
+        _configMode.value.alarms.forEach { releaseAlarmPermission(it.id) }
+        update { cfg -> cfg.copy(alarms = emptyList()) }
     }
 
-    fun setLaunchCount(index: Int, count: Int) {
-        updateConfig(index) { it.copy(launchCount = count) }
-    }
-
-    /** Изменение интервала сценария по его ID (существующий API UI). */
-    fun setInterval(channelId: Int, ms: Long) {
+    /** Переименовать: trim, обрезка до MAX_NAME_LENGTH, пустое → автоимя. */
+    fun renameAlarm(id: Int, name: String) {
+        if (editingLocked) { refuseEdit(); return }
+        val trimmed = name.trim().let { if (it.length > Defaults.MAX_NAME_LENGTH) it.take(Defaults.MAX_NAME_LENGTH) else it }
+        val fallback = "Будильник ${id + 1}"
         update { cfg ->
-            cfg.copy(channels = cfg.channels.map { ch ->
-                if (ch.id == channelId) ch.copy(intervalMs = ms.coerceAtLeast(Defaults.MIN_INTERVAL_MS)) else ch
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(name = trimmed.ifEmpty { fallback }) else ch
             })
         }
     }
 
-    /** Изменение интервала сценария по индексу в списке UI. */
-    fun setIntervalAt(index: Int, ms: Long) {
-        updateConfig(index) {
-            it.copy(intervalMs = ms.coerceAtLeast(Defaults.MIN_INTERVAL_MS))
-        }
-    }
-
-    fun setVolume(channelId: Int, percent: Int) {
+    /** Взять встроенный сигнал для любого будильника. */
+    fun setBuiltInBeep(id: Int) {
+        if (editingLocked) { refuseEdit(); return }
         update { cfg ->
-            cfg.copy(channels = cfg.channels.map { ch ->
-                if (ch.id == channelId) ch.copy(volumePercent = percent.coerceIn(0, 100)) else ch
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(fileUri = Defaults.BUILT_IN_BEEP, fileName = null) else ch
             })
         }
     }
 
-    fun setEnabled(channelId: Int, enabled: Boolean) {
+    // --- все сеттеры по id ---
+
+    fun setMode(id: Int, mode: SceneMode) {
+        if (editingLocked) { refuseEdit(); return }
         update { cfg ->
-            cfg.copy(channels = cfg.channels.map { ch ->
-                if (ch.id == channelId) ch.copy(enabled = enabled) else ch
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(mode = mode) else ch
+            })
+        }
+    }
+
+    fun setStartMinutes(id: Int, minutes: Int?) {
+        if (editingLocked) { refuseEdit(); return }
+        update { cfg ->
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(startMinutes = minutes) else ch
+            })
+        }
+    }
+
+    fun setEndMinutes(id: Int, minutes: Int?) {
+        if (editingLocked) { refuseEdit(); return }
+        update { cfg ->
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(endMinutes = minutes) else ch
+            })
+        }
+    }
+
+    fun setLaunchCount(id: Int, count: Int) {
+        if (editingLocked) { refuseEdit(); return }
+        update { cfg ->
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(launchCount = count) else ch
+            })
+        }
+    }
+
+    /** Изменение интервала сценария по id (одна функция вместо setInterval+setIntervalAt). */
+    fun setInterval(id: Int, ms: Long) {
+        if (editingLocked) { refuseEdit(); return }
+        update { cfg ->
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(intervalMs = ms.coerceAtLeast(Defaults.MIN_INTERVAL_MS)) else ch
+            })
+        }
+    }
+
+    fun setVolume(id: Int, percent: Int) {
+        if (editingLocked) { refuseEdit(); return }
+        update { cfg ->
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(volumePercent = percent.coerceIn(0, 100)) else ch
+            })
+        }
+    }
+
+    fun setEnabled(id: Int, enabled: Boolean) {
+        if (editingLocked) { refuseEdit(); return }
+        update { cfg ->
+            cfg.copy(alarms = cfg.alarms.map { ch ->
+                if (ch.id == id) ch.copy(enabled = enabled) else ch
             })
         }
     }
 
     fun setAutoStop(ms: Long) {
+        if (editingLocked) { refuseEdit(); return }
         update { it.copy(autoStopMs = ms.coerceAtLeast(0L)) }
     }
 
-    private fun updateConfig(index: Int, transform: (ChannelConfig) -> ChannelConfig) {
-        val current = _configMode.value
-        val next = current.copy(
-            channels = current.channels.mapIndexed { currentIndex, currentChannel ->
-                if (currentIndex == index) transform(currentChannel) else currentChannel
-            },
-        )
-        _configMode.value = next
-        viewModelScope.launch {
-            repo.save(next)
-        }
-    }
+    // ------------------------------------------------------------------ persistence
+
+    /** Debounce на запись (≈300 мс) — живёт в ViewModel. */
+    private var saveJob: Job? = null
 
     private fun update(transform: (TimerConfig) -> TimerConfig) {
         val next = transform(_configMode.value)
         _configMode.value = next
-        viewModelScope.launch {
+        saveJob?.cancel()
+        saveJob = viewModelScope.launch {
+            delay(300)
             repo.save(next)
         }
     }
 
     // ------------------------------------------------------------------ helpers
 
-    /** Отображаемое имя файла канала (для UI), либо null. */
-    fun fileDisplayName(channel: ChannelConfig): String? {
+    /** Release SAF-права для будильника, только если URI не занят другим будильником. */
+    private fun releaseAlarmPermission(id: Int) {
+        val uri = _configMode.value.alarms.firstOrNull { it.id == id }?.fileUri ?: return
+        if (uri.isEmpty() || uri == Defaults.BUILT_IN_BEEP) return
+        val usedByOthers = _configMode.value.alarms.any { it.id != id && it.fileUri == uri }
+        if (!usedByOthers) {
+            val ctx = getApplication<Application>()
+            runCatching {
+                ctx.contentResolver.releasePersistableUriPermission(
+                    Uri.parse(uri),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+        }
+    }
+
+    /** Отображаемое имя файла будильника (для UI), либо null. */
+    fun fileDisplayName(alarm: AlarmConfig): String? {
         return when {
-            channel.isBuiltInBeep -> "Встроенный сигнал (бип)"
-            !channel.hasFile -> null
+            alarm.isBuiltInBeep -> "Встроенный сигнал (бип)"
+            !alarm.hasFile -> null
             else -> {
-                // Приоритет — сохранённое в DataStore имя (ТЗ §11), fallback — live-запрос.
-                channel.fileName ?: queryDisplayName(Uri.parse(channel.fileUri))
-                    ?: channel.fileUri.substringAfterLast('/').ifEmpty { channel.fileUri }
+                alarm.fileName ?: queryDisplayName(Uri.parse(alarm.fileUri))
+                    ?: alarm.fileUri.substringAfterLast('/').ifEmpty { alarm.fileUri }
             }
         }
     }
@@ -206,7 +333,11 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         }.getOrNull()
     }
 
-    /** Строковое представление интервала HH:MM:SS. */
+    private fun send(action: String) {
+        val ctx = getApplication<Application>()
+        ctx.startService(TimerSoundService.commandIntent(ctx, action))
+    }
+
     companion object {
         fun formatInterval(ms: Long): String = com.timersound.timer.TimerSession.formatHms(ms)
     }

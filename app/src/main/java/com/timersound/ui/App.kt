@@ -10,24 +10,27 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Switch
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.DisposableEffect
+import com.timersound.audio.PreviewPlayer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -40,52 +43,217 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.timersound.R
 import com.timersound.TimerViewModel
-import com.timersound.model.ChannelConfig
-import com.timersound.model.SceneMode
+import com.timersound.model.AlarmConfig
+import com.timersound.model.Defaults
 import com.timersound.service.TimerStateHolder
-import com.timersound.timer.TimerSession
 import com.timersound.timer.TimerState
 
-/** Единственный экран приложения: статус, авто-остановка и 5 каналов. */
+/** Единственный экран приложения: статус, авто-остановка, список будильников, FAB. */
 @Composable
 fun App(vm: TimerViewModel = viewModel()) {
     val config by vm.config.collectAsStateWithLifecycle()
     val runtime by vm.runtime.collectAsStateWithLifecycle()
+    val canEdit by vm.canEdit.collectAsStateWithLifecycle()
+    val alarmCount = config.alarms.size
+    val isLocked = runtime.state == TimerState.RUNNING || runtime.state == TimerState.PAUSED
+
+    var expandedAlarmId by remember { mutableStateOf<Int?>(null) }
+    var pendingAlarmId by remember { mutableStateOf<Int?>(null) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    var showDeleteAllDialog by remember { mutableStateOf(false) }
+    var deleteTargetId by remember { mutableStateOf<Int?>(null) }
+
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { pendingAlarmId?.let { id -> vm.onFilePicked(id, uri) } }
+        pendingAlarmId = null
+    }
+
     NotificationPermissionRequest()
 
-    // Пока сессия активна — не даём экрану гаснуть (этот Huawei засыпает сам,
-    // а погасший экран перехватывает тапы и прячет UI, что «выглядит как сброс»).
     val view = LocalView.current
     SideEffect {
         view.keepScreenOn = runtime.state == TimerState.RUNNING || runtime.state == TimerState.PAUSED
     }
 
-    val missing = config.missingFileChannels()
-    val invalid = config.invalidScheduleChannels()
-    val canStart =
-        missing.isEmpty() && config.playableChannels().isNotEmpty() && invalid.isEmpty()
+    DisposableEffect(Unit) {
+        onDispose { PreviewPlayer.release() }
+    }
 
-    Scaffold { innerPadding ->
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Timer Sound") },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+                actions = {
+                    StatusBadge(state = runtime.state)
+                },
+            )
+        },
+        floatingActionButton = {
+            AddAlarmFab(
+                count = alarmCount,
+                enabled = canEdit.value && alarmCount < Defaults.MAX_ALARMS,
+                onAdd = { vm.addAlarm() },
+            )
+        },
+    ) { innerPadding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(innerPadding),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item(key = "status") {
-                StatusCard(runtime = runtime, canStart = canStart, missing = missing, invalid = invalid, vm = vm)
+                StatusCard(
+                    runtime = runtime,
+                    canStart = !isLocked,
+                    missing = config.missingFileAlarms(),
+                    invalid = config.invalidScheduleAlarms(),
+                    vm = vm,
+                )
+            }
+            if (isLocked) {
+                item(key = "lock_banner") { LockBanner() }
             }
             item(key = "autostop") {
-                AutoStopCard(autoStopMs = config.autoStopMs, onAutoStopChange = vm::setAutoStop)
+                AutoStopCard(
+                    autoStopMs = config.autoStopMs,
+                    onAutoStopChange = vm::setAutoStop,
+                    locked = isLocked,
+                )
             }
-            items(config.channels, key = { it.id }) { channel ->
-                ChannelCard(channel = channel, index = config.channels.indexOf(channel), vm = vm)
+            item(key = "counter") {
+                Text(
+                    text = "Будильники: $alarmCount/${Defaults.MAX_ALARMS}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
             }
+            if (alarmCount == 0) {
+                item(key = "empty") { EmptyState() }
+            } else {
+                items(config.alarms, key = { it.id }) { alarm ->
+                    AlarmCard(
+                        alarm = alarm,
+                        isExpanded = expandedAlarmId == alarm.id,
+                        vm = vm,
+                        onToggleExpand = {
+                            expandedAlarmId = if (expandedAlarmId == alarm.id) null else alarm.id
+                        },
+                        onDelete = { deleteTargetId = alarm.id; showDeleteDialog = true },
+                        onPickFile = { pendingAlarmId = alarm.id; filePicker.launch(arrayOf("audio/*")) },
+                    )
+                }
+            }
+        }
+    }
+
+    if (showDeleteDialog && deleteTargetId != null) {
+        val alarm = config.alarms.firstOrNull { it.id == deleteTargetId }
+        if (alarm != null) {
+            DeleteAlarmDialog(
+                alarm = alarm,
+                onConfirm = {
+                    vm.deleteAlarm(alarm.id)
+                    showDeleteDialog = false
+                    deleteTargetId = null
+                },
+                onDismiss = { showDeleteDialog = false; deleteTargetId = null },
+            )
+        }
+    }
+
+    if (showDeleteAllDialog) {
+        DeleteAllDialog(
+            count = alarmCount,
+            onConfirm = {
+                vm.deleteAllAlarms()
+                showDeleteAllDialog = false
+            },
+            onDismiss = { showDeleteAllDialog = false },
+        )
+    }
+}
+
+// ------------------------------------------------------------------ UI blocks
+
+@Composable
+private fun StatusBadge(state: TimerState) {
+    val (text, color) = when (state) {
+        TimerState.IDLE -> "Готов" to MaterialTheme.colorScheme.onSurfaceVariant
+        TimerState.RUNNING -> "Идёт" to MaterialTheme.colorScheme.primary
+        TimerState.PAUSED -> "Пауза" to MaterialTheme.colorScheme.tertiary
+        TimerState.COMPLETED -> "Завершено" to MaterialTheme.colorScheme.error
+    }
+    Surface(
+        shape = CircleShape,
+        color = color,
+        modifier = Modifier.size(48.dp),
+    ) {
+        androidx.compose.foundation.layout.Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.padding(4.dp),
+        ) {
+            Text(
+                text = text,
+                color = MaterialTheme.colorScheme.surface,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LockBanner() {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("⚠", style = MaterialTheme.typography.titleLarge)
+            Text(
+                text = "Идут срабатывания. Правки — после Стоп.",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AddAlarmFab(count: Int, enabled: Boolean, onAdd: () -> Unit) {
+    ExtendedFloatingActionButton(
+        onClick = onAdd,
+        enabled = enabled,
+        icon = { Icon(Icons.Default.Add, contentDescription = "Добавить") },
+        text = { Text("Добавить") },
+    )
+}
+
+@Composable
+private fun EmptyState() {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("Будильников нет", style = MaterialTheme.typography.titleMedium)
+            Text("Нажмите + Добавить", style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -96,8 +264,8 @@ fun App(vm: TimerViewModel = viewModel()) {
 private fun StatusCard(
     runtime: TimerStateHolder.Ui,
     canStart: Boolean,
-    missing: List<ChannelConfig>,
-    invalid: List<ChannelConfig>,
+    missing: List<AlarmConfig>,
+    invalid: List<AlarmConfig>,
     vm: TimerViewModel,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -111,20 +279,13 @@ private fun StatusCard(
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.weight(1f),
                 )
-                StatusBadge(state = runtime.state)
             }
             if (runtime.state == TimerState.RUNNING || runtime.state == TimerState.PAUSED) {
                 if (runtime.autoStop.isNotEmpty()) {
-                    Text(
-                        text = "До авто-остановки: ${runtime.autoStop}",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    Text("До авто-остановки: ${runtime.autoStop}", style = MaterialTheme.typography.bodyMedium)
                 }
                 if (runtime.nextSound.isNotEmpty()) {
-                    Text(
-                        text = "Следующий звук: ${runtime.nextSound}",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    Text("Следующий звук: ${runtime.nextSound}", style = MaterialTheme.typography.bodyMedium)
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -149,11 +310,9 @@ private fun StatusCard(
             }
             if (!canStart) {
                 val hint = when {
-                    invalid.isNotEmpty() ->
-                        "Исправьте расписание: " + invalid.joinToString { it.name } +
-                            " (проверь режим, время/количество)."
-                    missing.isNotEmpty() ->
-                        "Для старта укажите файл: " + missing.joinToString { it.name }
+                    invalid.isNotEmpty() -> "Исправьте расписание: " + invalid.joinToString { it.name } +
+                        " (проверь режим, время/количество)."
+                    missing.isNotEmpty() -> "Для старта укажите файл: " + missing.joinToString { it.name }
                     else -> "Включите хотя бы один канал с файлом."
                 }
                 Text(
@@ -176,26 +335,10 @@ private fun StopButton(onClick: () -> Unit) {
     }
 }
 
-@Composable
-private fun StatusBadge(state: TimerState) {
-    val (text, color) = when (state) {
-        TimerState.IDLE -> "Готов" to MaterialTheme.colorScheme.onSurfaceVariant
-        TimerState.RUNNING -> "Идёт" to MaterialTheme.colorScheme.primary
-        TimerState.PAUSED -> "Пауза" to MaterialTheme.colorScheme.tertiary
-        TimerState.COMPLETED -> "Завершено" to MaterialTheme.colorScheme.error
-    }
-    Text(
-        text = text,
-        color = color,
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.Bold,
-    )
-}
-
 // ------------------------------------------------------------------ auto-stop card
 
 @Composable
-private fun AutoStopCard(autoStopMs: Long, onAutoStopChange: (Long) -> Unit) {
+private fun AutoStopCard(autoStopMs: Long, onAutoStopChange: (Long) -> Unit, locked: Boolean) {
     var limited by remember(autoStopMs) { mutableStateOf(autoStopMs > 0L) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -210,268 +353,19 @@ private fun AutoStopCard(autoStopMs: Long, onAutoStopChange: (Long) -> Unit) {
                 )
                 Switch(
                     checked = limited,
+                    enabled = !locked,
                     onCheckedChange = { limited = it; if (!it) onAutoStopChange(0L) },
                 )
             }
             if (limited) {
                 DurationField(valueMs = autoStopMs, onChange = onAutoStopChange, label = "ЧЧ:ММ:СС")
-                Text(
-                    text = "Остановит все каналы и отметит сессию «Завершено».",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Text("Остановит все каналы и отметит сессию «Завершено».", style = MaterialTheme.typography.bodySmall)
             } else {
-                Text(
-                    text = "Без ограничения — таймер работает до нажатия «Стоп».",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Text("Без ограничения — таймер работает до нажатия «Стоп».", style = MaterialTheme.typography.bodySmall)
             }
         }
     }
 }
-
-// ------------------------------------------------------------------ channel card
-
-@Composable
-private fun ChannelCard(channel: ChannelConfig, index: Int, vm: TimerViewModel) {
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { vm.onFilePicked(channel.id, it) }
-    }
-    val fileName = remember(channel.fileUri) { vm.fileDisplayName(channel) }
-
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = channel.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = if (channel.enabled) "ВКЛ" else "ВЫКЛ",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (channel.enabled) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Switch(
-                    checked = channel.enabled,
-                    onCheckedChange = { vm.setEnabled(channel.id, it) },
-                )
-            }
-
-            // Файл
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = fileName ?: "Файл не выбран",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (fileName == null) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = { filePicker.launch(arrayOf("audio/*")) }) { Text("Выбрать") }
-                if (fileName != null) {
-                    TextButton(onClick = { vm.preview(channel.id) }) { Text("Прослушать") }
-                    TextButton(onClick = { vm.removeFile(channel.id) }) {
-                        Text(if (channel.isBuiltInBeep) "Сброс" else "Удалить")
-                    }
-                }
-            }
-
-            // Рам: выбор режима сценария
-            Text(
-                text = "Режим",
-                style = MaterialTheme.typography.titleSmall,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                SceneMode.values().forEach { mode ->
-                    FilterChip(
-                        selected = channel.mode == mode,
-                        onClick = { vm.setMode(index, mode) },
-                        label = { Text(mode.label) },
-                    )
-                }
-            }
-
-            // Поля конкретного режима
-            when (channel.mode) {
-                SceneMode.REPEAT -> {
-                    TimeField(
-                        value = channel.startMinutes,
-                        onChange = { vm.setStartMinutes(index, it) },
-                        label = "Начать с (HH:MM), пусто — сразу",
-                    )
-                }
-                SceneMode.ONCE_TIME -> {
-                    TimeField(
-                        value = channel.startMinutes,
-                        onChange = { vm.setStartMinutes(index, it) },
-                        label = "Время (HH:MM)",
-                    )
-                }
-                SceneMode.INTERVAL -> {
-                    TimeField(
-                        value = channel.startMinutes,
-                        onChange = { vm.setStartMinutes(index, it) },
-                        label = "Первый в (HH:MM)",
-                    )
-                    CountField(
-                        value = channel.launchCount,
-                        onChange = { vm.setLaunchCount(index, it) },
-                        label = "Сколько раз",
-                    )
-                }
-                SceneMode.RANDOM -> {
-                    TimeField(
-                        value = channel.startMinutes,
-                        onChange = { vm.setStartMinutes(index, it) },
-                        label = "Окно от (HH:MM)",
-                    )
-                    TimeField(
-                        value = channel.endMinutes,
-                        onChange = { vm.setEndMinutes(index, it) },
-                        label = "Окно до (HH:MM, не вкл.)",
-                    )
-                    CountField(
-                        value = channel.launchCount,
-                        onChange = { vm.setLaunchCount(index, it) },
-                        label = "Сколько звуков",
-                    )
-                }
-            }
-
-            // Интервал: актуален только для бесконечного повтора и N-раз
-            if (channel.mode == SceneMode.REPEAT || channel.mode == SceneMode.INTERVAL) {
-                DurationField(
-                    valueMs = channel.intervalMs,
-                    onChange = { vm.setInterval(channel.id, it) },
-                    label = "Интервал ЧЧ:ММ:СС",
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Presets.forEach { (label, ms) ->
-                        FilterChip(
-                            selected = channel.intervalMs == ms,
-                            onClick = { vm.setInterval(channel.id, ms) },
-                            label = { Text(label) },
-                        )
-                    }
-                }
-            }
-
-            // Громкость
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "Громкость",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                Slider(
-                    value = channel.volumePercent.toFloat(),
-                    onValueChange = { vm.setVolume(channel.id, it.toInt()) },
-                    valueRange = 0f..100f,
-                    modifier = Modifier.weight(3f),
-                )
-                Text(
-                    text = "${channel.volumePercent}%",
-                    style = MaterialTheme.typography.labelLarge,
-                )
-            }
-        }
-    }
-}
-
-// ------------------------------------------------------------------ input helpers
-
-private val Presets: List<Pair<String, Long>> = listOf(
-    "1 мин" to 60_000L,
-    "3 мин" to 180_000L,
-    "5 мин" to 300_000L,
-    "10 мин" to 600_000L,
-    "15 мин" to 900_000L,
-    "30 мин" to 1_800_000L,
-)
-
-@Composable
-private fun DurationField(valueMs: Long, onChange: (Long) -> Unit, label: String) {
-    var text by remember(valueMs) { mutableStateOf(TimerSession.formatHms(valueMs)) }
-    OutlinedTextField(
-        value = text,
-        onValueChange = { raw ->
-            val cleaned = raw.filter { it.isDigit() || it == ':' }.take(8)
-            text = cleaned
-            parseHms(cleaned)?.let(onChange)
-        },
-        singleLine = true,
-        isError = text.isNotEmpty() && parseHms(text) == null,
-        label = { Text(label) },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-    )
-}
-
-/** Строгий разбор «ЧЧ:ММ:СС» (ровно 8 символов). */
-internal fun parseHms(text: String): Long? {
-    if (text.length != 8) return null
-    val parts = text.split(':')
-    if (parts.size != 3) return null
-    val h = parts[0].toIntOrNull() ?: return null
-    val m = parts[1].toIntOrNull() ?: return null
-    val s = parts[2].toIntOrNull() ?: return null
-    if (m > 59 || s > 59) return null
-    return (h * 3600L + m * 60L + s) * 1000L
-}
-
-/** Поле времени «ЧЧ:ММ» → минуты с полуночи; null — пусто/невалидно. */
-@Composable
-private fun TimeField(value: Int?, onChange: (Int?) -> Unit, label: String) {
-    var text by remember(value) { mutableStateOf(value?.let(::formatMinutes) ?: "") }
-    OutlinedTextField(
-        value = text,
-        onValueChange = { raw ->
-            val cleaned = raw.filter { it.isDigit() || it == ':' }.take(5)
-            text = cleaned
-            onChange(parseHm(cleaned))
-        },
-        singleLine = true,
-        isError = text.isNotEmpty() && parseHm(text) == null,
-        label = { Text(label) },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-    )
-}
-
-/** Числовое поле количества срабатываний. */
-@Composable
-private fun CountField(value: Int, onChange: (Int) -> Unit, label: String) {
-    OutlinedTextField(
-        value = if (value == 0) "" else value.toString(),
-        onValueChange = { raw ->
-            onChange(raw.filter { it.isDigit() }.take(6).toIntOrNull() ?: 0)
-        },
-        singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        label = { Text(label) },
-    )
-}
-
-/** Разбор «ЧЧ:ММ» в минуты с полуночи; 24:00 допустимо только как 1440 (конец окна). */
-internal fun parseHm(text: String): Int? {
-    if (text.length != 5) return null
-    val parts = text.split(':')
-    if (parts.size != 2) return null
-    val h = parts[0].toIntOrNull() ?: return null
-    val m = parts[1].toIntOrNull() ?: return null
-    if (m > 59) return null
-    val total = h * 60 + m
-    return when {
-        total <= 24 * 60 - 1 -> total // 00:00..23:59
-        total == 24 * 60 && m == 0 -> total // 24:00 → 1440
-        else -> null
-    }
-}
-
-/** Обратное отображение минут в «ЧЧ:ММ»; 1440 → «24:00». */
-internal fun formatMinutes(minutes: Int): String =
-    if (minutes == 24 * 60) "24:00" else "%02d:%02d".format(minutes / 60, minutes % 60)
 
 // ------------------------------------------------------------------ permissions
 
@@ -489,3 +383,4 @@ private fun NotificationPermissionRequest() {
         }
     }
 }
+

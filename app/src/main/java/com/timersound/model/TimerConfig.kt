@@ -1,22 +1,22 @@
 package com.timersound.model
 
 /**
- * Настройка одного звукового канала.
+ * Настройка одного будильника.
  *
- * @param id            0-based индекс канала (0..4), фиксировано 5 каналов.
- * @param name          Отображаемое имя, «Канал 1..5».
+ * @param id            Стабильный монотонный идентификатор (не переиспользуется).
+ * @param name          Отображаемое имя; пустое → «Будильник {id}» на рендере.
  * @param fileUri       URI выбранного аудиофайла (SAF, persistable) или [BUILT_IN_BEEP]
- *                      для встроенного сигнала канала 1, или "" если файл не задан.
+ *                      для встроенного сигнала, или "" если файл не задан.
  * @param fileName      Сохранённое отображаемое имя файла (ТЗ §11); если null — имени нет.
  * @param mode          Способ запуска звуков сценария.
  * @param intervalMs    Интервал между воспроизведениями, мс (минимум [MIN_INTERVAL_MS]).
  * @param startMinutes  Минуты с полуночи для запуска; null — поле не используется.
  * @param endMinutes    Минуты с полуночи, конец RANDOM-окна (exclusive).
  * @param launchCount   Количество срабатываний для INTERVAL/RANDOM; 0 — не задано.
- * @param volumePercent Громкость канала, 0..100.
- * @param enabled       Канал включён в сессию таймера.
+ * @param volumePercent Громкость будильника, 0..100.
+ * @param enabled       Будильник включён в сессию таймера.
  */
-data class ChannelConfig(
+data class AlarmConfig(
     val id: Int,
     val name: String,
     val fileUri: String,
@@ -49,43 +49,44 @@ data class ChannelConfig(
 
 /** Полная конфигурация таймера. */
 data class TimerConfig(
-    val channels: List<ChannelConfig>,
+    val alarms: List<AlarmConfig>,
     /** 0 — без ограничения; иначе авто-остановка через это время от старта. */
     val autoStopMs: Long,
 ) {
-    /** Каналы, которые должны звучать: включены и имеют файл. */
-    fun playableChannels(): List<ChannelConfig> = channels.filter { it.enabled && it.hasFile }
+    /** Будильники, которые должны звучать: включены и имеют файл. */
+    fun playableAlarms(): List<AlarmConfig> = alarms.filter { it.enabled && it.hasFile }
 
     /** Включённые, но без файла — блокируют старт. */
-    fun missingFileChannels(): List<ChannelConfig> = channels.filter { it.enabled && !it.hasFile }
+    fun missingFileAlarms(): List<AlarmConfig> = alarms.filter { it.enabled && !it.hasFile }
 
     /** Включённые с файлом, но с невалидным расписанием — блокируют старт. */
-    fun invalidScheduleChannels(): List<ChannelConfig> =
-        channels.filter { it.enabled && it.hasFile && !it.scheduleValid }
+    fun invalidScheduleAlarms(): List<AlarmConfig> =
+        alarms.filter { it.enabled && it.hasFile && !it.scheduleValid }
 }
 
 object Defaults {
-    const val CHANNEL_COUNT = 5
+    const val MAX_ALARMS = 100
     const val MIN_INTERVAL_MS = 1_000L
     const val MINUTES_PER_DAY = 24 * 60
     const val DEFAULT_INTERVAL_MS = 5 * 60_000L
     const val DEFAULT_VOLUME_PERCENT = 80
+    const val MAX_NAME_LENGTH = 40
 
     /** Маркер встроенного тестового сигнала (res/raw/beep.wav). */
     const val BUILT_IN_BEEP = "@beep"
 
-    fun defaultChannel(id: Int): ChannelConfig = ChannelConfig(
+    fun newAlarm(id: Int, orderNumber: Int): AlarmConfig = AlarmConfig(
         id = id,
-        name = "Канал ${id + 1}",
-        // Канал 1 — встроенный тестовый сигнал, остальные пустые.
+        name = "Будильник ${orderNumber + 1}",
+        // Первый будильник — встроенный тестовый сигнал, остальные пустые.
         fileUri = if (id == 0) BUILT_IN_BEEP else "",
         intervalMs = DEFAULT_INTERVAL_MS,
         volumePercent = DEFAULT_VOLUME_PERCENT,
         enabled = id == 0,
     )
 
-    fun defaultConfig(): TimerConfig = TimerConfig(
-        channels = (0 until CHANNEL_COUNT).map(::defaultChannel),
+    fun firstRunConfig(): TimerConfig = TimerConfig(
+        alarms = listOf(newAlarm(0, 0)),
         autoStopMs = 0L,
     )
 }

@@ -1,6 +1,9 @@
 package com.timersound.model
 
+import kotlinx.serialization.Serializable
+
 /** Способ запуска звуков сценария. */
+@Serializable
 enum class SceneMode {
     REPEAT, ONCE_TIME, INTERVAL, RANDOM;
 

@@ -33,6 +33,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.timersound.R
 import com.timersound.audio.AudioEngine
+import com.timersound.audio.PreviewPlayer
 import com.timersound.data.PreferencesRepository
 import com.timersound.timer.TimerSession
 import com.timersound.timer.TimerState
@@ -118,13 +119,14 @@ class TimerSoundService : Service() {
     private fun handleStart() {
         scope.launch {
             val config = prefs.config.first()
-            if (config.playableChannels().isEmpty()) {
+            if (config.playableAlarms().isEmpty()) {
                 handleStop(completed = false)
                 return@launch
             }
             AudioEngine.releaseAll()
+            PreviewPlayer.stop()
             session.start(config)
-            Log.i(TAG, "handleStart: playableTasks=${config.playableChannels().size}, nextEvent=${session.nextEventElapsedMs()}")
+            Log.i(TAG, "handleStart: playableTasks=${config.playableAlarms().size}, nextEvent=${session.nextEventElapsedMs()}")
             acquireWakeLock()
             setupMediaSession(playing = true)
             startAsForeground()

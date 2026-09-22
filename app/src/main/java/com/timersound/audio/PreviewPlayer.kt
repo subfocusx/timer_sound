@@ -6,15 +6,33 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
-import com.timersound.model.ChannelConfig
+import com.timersound.model.AlarmConfig
+import com.timersound.model.Defaults
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorJob
 
 /**
- * Компонент плеера в карточке (media3 ExoPlayer) с API play/pause/stop/release.
- * Один экземпляр на приложение — реиспользуется по всему UI.
+ * Компонент плеера в карточке (media3 ExoPlayer).
+ * Один экземпляр на процесс — реиспользуется по всему UI.
+ * Ровно одна активная дорожка: запуск на другом будильнике останавливает предыдущий.
+ * Прогресс обновляется каждые 250 мс через внутренний ticker.
  */
 object PreviewPlayer {
 
     private const val TAG = "PreviewPlayer"
+
+    private val scope = CoroutineScope(Dispatchers.Main + supervisorJob())
+
+    private val _state = MutableStateFlow<State?>(null)
+    val state: StateFlow<State?> = _state.asStateFlow()
 
     @Volatile
     private var player: ExoPlayer? = null
@@ -22,7 +40,8 @@ object PreviewPlayer {
     @Volatile
     private var currentAlarmId: Int? = null
 
-    /** Параметры состояния для UI — позиция и продолжительность в мс. */
+    private var tickerJob: Job? = null
+
     data class State(
         val alarmId: Int,
         val isPlaying: Boolean,
@@ -30,11 +49,21 @@ object PreviewPlayer {
         val durationMs: Long,
     )
 
-    /** Свойство для чтения из UI — null, если никакой preview не активен. */
-    val state: State?
-        get() = player?.let { p ->
-            currentAlarmId?.let { id ->
-                State(
+    // ------------------------------------------------------------------ ticker
+
+    private fun stopTicker() {
+        tickerJob?.cancel()
+        tickerJob = null
+    }
+
+    private fun startTicker() {
+        stopTicker()
+        tickerJob = scope.launch {
+            while (isActive) {
+                delay(250)
+                val p = player ?: return@launch
+                val id = currentAlarmId ?: return@launch
+                _state.value = State(
                     alarmId = id,
                     isPlaying = p.isPlaying,
                     positionMs = p.currentPosition,
@@ -42,18 +71,33 @@ object PreviewPlayer {
                 )
             }
         }
+    }
 
-    /** Запустить воспроизведение channelConfig (URI или встроенный beep). */
-    fun play(context: Context, channelConfig: ChannelConfig) {
+    private fun updateState() {
+        player?.let { p ->
+            val id = currentAlarmId ?: return
+            _state.value = State(
+                alarmId = id,
+                isPlaying = p.isPlaying,
+                positionMs = p.currentPosition,
+                durationMs = p.duration,
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------ API
+
+    /** Запустить воспроизведение будильника (URI или встроенный beep). */
+    fun play(context: Context, alarm: AlarmConfig) {
         stop()
-        val uri = alarmConfig.fileUri
-        val isBeep = uri == "@beep"
+        val uri = alarm.fileUri
+        val isBeep = uri == Defaults.BUILT_IN_BEEP
         val mediaItem = when {
             isBeep -> {
                 val packageName = context.packageName
                 val rawId = context.resources.getIdentifier("beep", "raw", packageName)
                 if (rawId == 0) {
-                    Log.w(TAG, "Встроенный beep не найден: alarmId=${alarmConfig.id}")
+                    Log.w(TAG, "Встроенный beep не найден: alarmId=${alarm.id}")
                     return
                 }
                 val uriString = "android.resource://$packageName/$rawId"
@@ -61,7 +105,7 @@ object PreviewPlayer {
             }
             uri.isNotEmpty() -> MediaItem.fromUri(uri)
             else -> {
-                Log.w(TAG, "Попытка воспроизвести без файла: alarmId=${alarmConfig.id}")
+                Log.w(TAG, "Попытка воспроизвести без файла: alarmId=${alarm.id}")
                 return
             }
         }
@@ -84,17 +128,21 @@ object PreviewPlayer {
                 if (playbackState == Player.STATE_ENDED) {
                     stop()
                 }
+                updateState()
             }
         })
         player = exoPlayer
-        currentAlarmId = alarmConfig.id
-        Log.d(TAG, "Запущен превью-плеер для alarmId=${alarmConfig.id}")
+        currentAlarmId = alarm.id
+        updateState()
+        startTicker()
+        Log.d(TAG, "Запущен превью-плеер для alarmId=${alarm.id}")
     }
 
     /** Приостановить, если играет. */
     fun pause() {
         if (player?.isPlaying == true) {
             player?.playWhenReady = false
+            updateState()
             Log.d(TAG, "Пауза превью-плеера")
         }
     }
@@ -103,6 +151,7 @@ object PreviewPlayer {
     fun resume() {
         if (player?.isPlaying != true) {
             player?.playWhenReady = true
+            updateState()
             Log.d(TAG, "Продолжение превью-плеера")
         }
     }
@@ -116,6 +165,8 @@ object PreviewPlayer {
         }
         player = null
         currentAlarmId = null
+        stopTicker()
+        _state.value = null
     }
 
     /** Освободить без остановки (использовать при уходе из UI). */

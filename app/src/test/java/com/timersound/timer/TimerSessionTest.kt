@@ -8,7 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Calendar
 import java.util.TimeZone
-import com.timersound.model.ChannelConfig
+import com.timersound.model.AlarmConfig
 import com.timersound.model.SceneMode
 import com.timersound.model.TimerConfig
 
@@ -22,7 +22,7 @@ class TimerSessionTest {
 
     private val tickMs = 250L
 
-    private fun channel(
+    private fun alarm(
         id: Int,
         intervalMs: Long = 60_000L,
         enabled: Boolean = true,
@@ -31,7 +31,7 @@ class TimerSessionTest {
         startMinutes: Int? = null,
         endMinutes: Int? = null,
         launchCount: Int = 0,
-    ): ChannelConfig = ChannelConfig(
+    ): AlarmConfig = AlarmConfig(
         id = id,
         name = "Канал ${id + 1}",
         fileUri = fileUri,
@@ -45,9 +45,9 @@ class TimerSessionTest {
     )
 
     private fun config(
-        channels: List<ChannelConfig>,
+        alarms: List<AlarmConfig>,
         autoStopMs: Long = 0L,
-    ): TimerConfig = TimerConfig(channels = channels, autoStopMs = autoStopMs)
+    ): TimerConfig = TimerConfig(alarms = alarms, autoStopMs = autoStopMs)
 
     // ---------------------------------------------------------------- start / tick
 
@@ -55,7 +55,7 @@ class TimerSessionTest {
     fun startSetsRunningAndSchedulesFirstFire() {
         val session = TimerSession()
         val now = 10_000L
-        session.start(config(listOf(channel(0, intervalMs = 20_000L))), now)
+        session.start(config(listOf(alarm(0, intervalMs = 20_000L))), now)
         assertEquals(TimerState.RUNNING, session.state)
         assertTrue(session.isRunning)
         assertTrue(session.isActive)
@@ -76,7 +76,7 @@ class TimerSessionTest {
     fun tickFiresOnExactBoundaryThenReschedules() {
         val session = TimerSession()
         val now = 0L
-        session.start(config(listOf(channel(0, intervalMs = 10_000L))), now)
+        session.start(config(listOf(alarm(0, intervalMs = 10_000L))), now)
 
         val fired = mutableListOf<Long>()
         session.tick(now + 10_000L) { fired += it.id.toLong() }
@@ -94,7 +94,7 @@ class TimerSessionTest {
     fun tickCatchesUpMissedIntervals() {
         val session = TimerSession()
         val now = 0L
-        session.start(config(listOf(channel(0, intervalMs = 5_000L))), now)
+        session.start(config(listOf(alarm(0, intervalMs = 5_000L))), now)
 
         // Пропуск тиков: с учётом немедленного старта за 25 с проходит 6 срабатываний.
         val fired = mutableListOf<Int>()
@@ -107,7 +107,7 @@ class TimerSessionTest {
         val session = TimerSession()
         val now = 0L
         // 200 мс < минимума 1000 мс — интервал принудительно 1 с.
-        session.start(config(listOf(channel(0, intervalMs = 200L))), now)
+        session.start(config(listOf(alarm(0, intervalMs = 200L))), now)
 
         val fired = mutableListOf<Int>()
         session.tick(now) { fired += it.id }
@@ -125,8 +125,8 @@ class TimerSessionTest {
         session.start(
             config(
                 listOf(
-                    channel(0, intervalMs = 10_000L),
-                    channel(1, intervalMs = 20_000L),
+                    alarm(0, intervalMs = 10_000L),
+                    alarm(1, intervalMs = 20_000L),
                 )
             ),
             now,
@@ -142,14 +142,14 @@ class TimerSessionTest {
 
     @Test
     fun disabledOrMissngFileChannelsAreNotScheduled() {
-        val c0 = channel(0)
-        val c1 = channel(1).copy(enabled = false)
-        val c2 = channel(2).copy(fileUri = "")
+        val c0 = alarm(0)
+        val c1 = alarm(1).copy(enabled = false)
+        val c2 = alarm(2).copy(fileUri = "")
         val cfg = config(listOf(c0, c1, c2), autoStopMs = 0L)
 
-        assertEquals(1, cfg.playableChannels().size)
-        // missingFileChannels — только включённые, но без файла.
-        assertEquals(1, cfg.missingFileChannels().size)
+        assertEquals(1, cfg.playableAlarms().size)
+        // missingFileAlarms — только включённые, но без файла.
+        assertEquals(1, cfg.missingFileAlarms().size)
 
         val session = TimerSession()
         session.start(cfg, 0L)
@@ -165,7 +165,7 @@ class TimerSessionTest {
     fun pauseKeepsRemainingAndResumeKeepsCadence() {
         val session = TimerSession()
         val now = 0L
-        session.start(config(listOf(channel(0, intervalMs = 10_000L))), now)
+        session.start(config(listOf(alarm(0, intervalMs = 10_000L))), now)
 
         // Первый REPEAT-звук срабатывает сразу; затем пауза на 3-й секунде.
         val fired = mutableListOf<Int>()
@@ -204,7 +204,7 @@ class TimerSessionTest {
     @Test
     fun stopReturnsToIdle() {
         val session = TimerSession()
-        session.start(config(listOf(channel(0))), 0L)
+        session.start(config(listOf(alarm(0))), 0L)
         session.stop()
         assertEquals(TimerState.IDLE, session.state)
         assertFalse(session.isActive)
@@ -218,7 +218,7 @@ class TimerSessionTest {
     @Test
     fun markCompletedAndReset() {
         val session = TimerSession()
-        session.start(config(listOf(channel(0))), 0L)
+        session.start(config(listOf(alarm(0))), 0L)
         session.markCompleted()
         assertEquals(TimerState.COMPLETED, session.state)
         assertFalse(session.isActive)
@@ -234,7 +234,7 @@ class TimerSessionTest {
         val session = TimerSession()
         val now = 0L
         // Канал звучит каждые 10 с, авто-остановка через 30 с.
-        session.start(config(listOf(channel(0, intervalMs = 10_000L)), autoStopMs = 30_000L), now)
+        session.start(config(listOf(alarm(0, intervalMs = 10_000L)), autoStopMs = 30_000L), now)
 
         val fired = mutableListOf<Int>()
         // До дедлайна — обычные срабатывания.
@@ -251,7 +251,7 @@ class TimerSessionTest {
     fun countdownToAutoStop() {
         val session = TimerSession()
         val now = 0L
-        session.start(config(listOf(channel(0)), autoStopMs = 30_000L), now)
+        session.start(config(listOf(alarm(0)), autoStopMs = 30_000L), now)
 
         assertEquals(30_000L, session.countdownToAutoStopMs(now))
         assertEquals(17_500L, session.countdownToAutoStopMs(now + 12_500L))
@@ -261,7 +261,7 @@ class TimerSessionTest {
     @Test
     fun noAutoStopWithoutLimit() {
         val session = TimerSession()
-        session.start(config(listOf(channel(0)), autoStopMs = 0L), 0L)
+        session.start(config(listOf(alarm(0)), autoStopMs = 0L), 0L)
         assertNull(session.countdownToAutoStopMs(50_000L))
     }
 
@@ -274,8 +274,8 @@ class TimerSessionTest {
         session.start(
             config(
                 listOf(
-                    channel(0, intervalMs = 30_000L),
-                    channel(1, intervalMs = 10_000L),
+                    alarm(0, intervalMs = 30_000L),
+                    alarm(1, intervalMs = 10_000L),
                 )
             ),
             now,
@@ -290,7 +290,7 @@ class TimerSessionTest {
     fun nextFireForChannel() {
         val session = TimerSession()
         val now = 0L
-        session.start(config(listOf(channel(0, intervalMs = 10_000L))), now)
+        session.start(config(listOf(alarm(0, intervalMs = 10_000L))), now)
         session.tick(now) { }
 
         assertEquals(10_000L, session.nextFireForChannel(0, now))
@@ -304,7 +304,7 @@ class TimerSessionTest {
     @Test
     fun repeatWithoutStartTimeFiresImmediately() {
         val session = TimerSession()
-        session.start(config(listOf(channel(0))), 0L)
+        session.start(config(listOf(alarm(0))), 0L)
 
         val fired = mutableListOf<Int>()
         session.tick(0L) { fired += it.id }
@@ -317,7 +317,7 @@ class TimerSessionTest {
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
         val nowWall = epochUtc(2026, 9, 21, 11, 0, 0)
         val nowElapsed = 1_000_000L
-        val ch = channel(
+        val ch = alarm(
             id = 1,
             mode = SceneMode.ONCE_TIME,
             startMinutes = 11 * 60 + 45,
@@ -340,7 +340,7 @@ class TimerSessionTest {
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
         val nowWall = epochUtc(2026, 9, 21, 10, 0, 0)
         val nowElapsed = 500_000L
-        val ch = channel(
+        val ch = alarm(
             id = 2,
             mode = SceneMode.INTERVAL,
             startMinutes = 10 * 60 + 10,
@@ -365,7 +365,7 @@ class TimerSessionTest {
     fun repeatWithStartTimeFiresAtClockThenEveryInterval() {
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
         val nowWall = epochUtc(2026, 9, 21, 12, 0, 0)
-        val ch = channel(
+        val ch = alarm(
             id = 3,
             mode = SceneMode.REPEAT,
             startMinutes = 12 * 60 + 5,
@@ -387,7 +387,7 @@ class TimerSessionTest {
     fun randomFixedAtStartSurvivesPauseResume() {
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
         val nowWall = epochUtc(2026, 9, 21, 9, 0, 0)
-        val ch = channel(
+        val ch = alarm(
             id = 4,
             mode = SceneMode.RANDOM,
             startMinutes = 600,

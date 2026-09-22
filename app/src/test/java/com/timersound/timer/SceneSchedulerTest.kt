@@ -1,6 +1,6 @@
 package com.timersound.timer
 
-import com.timersound.model.ChannelConfig
+import com.timersound.model.AlarmConfig
 import com.timersound.model.SceneMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -59,14 +59,14 @@ class SceneSchedulerTest {
     fun onceTimeProducesSingleFutureClockEvent() {
         val nowElapsed = 1_000_000L
         val nowWall = epochUtc(2026, 9, 21, 11, 0, 0)
-        val channel = channel(
+        val alarm = alarm(
             mode = SceneMode.ONCE_TIME,
             startMinutes = 11 * 60 + 45,
         )
 
         assertEquals(
             nowElapsed + 45 * 60_000L,
-            SceneScheduler.fireTimesFor(channel, nowElapsed, nowWall).single(),
+            SceneScheduler.fireTimesFor(alarm, nowElapsed, nowWall).single(),
         )
     }
 
@@ -74,14 +74,14 @@ class SceneSchedulerTest {
     fun intervalProducesLaunchCountEventsAtClampedStep() {
         val nowElapsed = 500_000L
         val nowWall = epochUtc(2026, 9, 21, 10, 0, 0)
-        val channel = channel(
+        val alarm = alarm(
             mode = SceneMode.INTERVAL,
             startMinutes = 10 * 60 + 10,
             intervalMs = 100L,
             launchCount = 3,
         )
 
-        val times = SceneScheduler.fireTimesFor(channel, nowElapsed, nowWall)
+        val times = SceneScheduler.fireTimesFor(alarm, nowElapsed, nowWall)
         val first = nowElapsed + 10 * 60_000L
 
         assertEquals(listOf(first, first + 1_000L, first + 2_000L), times)
@@ -91,29 +91,29 @@ class SceneSchedulerTest {
     fun repeatWithStartTimeUsesClockThenReturnsNoFiniteList() {
         val nowElapsed = 0L
         val nowWall = epochUtc(2026, 9, 21, 12, 0, 0)
-        val channel = channel(
+        val alarm = alarm(
             mode = SceneMode.REPEAT,
             startMinutes = 12 * 60 + 5,
             intervalMs = 60_000L,
         )
 
-        assertEquals(nowElapsed + 5 * 60_000L, SceneScheduler.initialRepeatFire(nowElapsed, nowWall, channel.startMinutes))
-        assertTrue(SceneScheduler.fireTimesFor(channel, nowElapsed, nowWall).isEmpty())
+        assertEquals(nowElapsed + 5 * 60_000L, SceneScheduler.initialRepeatFire(nowElapsed, nowWall, alarm.startMinutes))
+        assertTrue(SceneScheduler.fireTimesFor(alarm, nowElapsed, nowWall).isEmpty())
     }
 
     @Test
     fun randomProducesDistinctMinutesInsideWindowAndIsDeterministic() {
         val nowElapsed = 0L
         val nowWall = epochUtc(2026, 9, 21, 9, 0, 0)
-        val channel = channel(
+        val alarm = alarm(
             mode = SceneMode.RANDOM,
             startMinutes = 600,
             endMinutes = 630,
             launchCount = 5,
         )
 
-        val first = SceneScheduler.fireTimesFor(channel, nowElapsed, nowWall)
-        val second = SceneScheduler.fireTimesFor(channel, nowElapsed, nowWall)
+        val first = SceneScheduler.fireTimesFor(alarm, nowElapsed, nowWall)
+        val second = SceneScheduler.fireTimesFor(alarm, nowElapsed, nowWall)
         val base = SceneScheduler.localMidnightWall(nowWall) + SceneScheduler.offset(nowElapsed, nowWall)
         val windowStart = base + 600 * 60_000L
         val windowEnd = base + 630 * 60_000L
@@ -133,13 +133,13 @@ class SceneSchedulerTest {
         minutes.forEach { assertTrue(it in 0 until 30) }
     }
 
-    private fun channel(
+    private fun alarm(
         mode: SceneMode,
         startMinutes: Int? = null,
         endMinutes: Int? = null,
         intervalMs: Long = 60_000L,
         launchCount: Int = 0,
-    ): ChannelConfig = ChannelConfig(
+    ): AlarmConfig = AlarmConfig(
         id = 1,
         name = "Сценарий",
         fileUri = "file:///tmp/beep.mp3",

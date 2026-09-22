@@ -1,7 +1,7 @@
 package com.timersound.timer
 
 import android.os.SystemClock
-import com.timersound.model.ChannelConfig
+import com.timersound.model.AlarmConfig
 import com.timersound.model.SceneMode
 import com.timersound.model.TimerConfig
 
@@ -23,7 +23,7 @@ enum class TimerState { IDLE, RUNNING, PAUSED, COMPLETED }
 class TimerSession {
 
     private data class Scheduled(
-        val config: ChannelConfig,
+        val config: AlarmConfig,
         var nextFireElapsedMs: Long,
         /** Остаток до ближайшего события на момент паузы. */
         var remainingOnPauseMs: Long = 0L,
@@ -51,7 +51,7 @@ class TimerSession {
         nowWallMs: Long = System.currentTimeMillis(),
     ) {
         scheduled.clear()
-        config.playableChannels()
+        config.playableAlarms()
             .filter { it.scheduleValid }
             .forEach { ch ->
                 val fires = SceneScheduler.fireTimesFor(ch, nowElapsedMs, nowWallMs)
@@ -138,7 +138,7 @@ class TimerSession {
     @Synchronized
     fun tick(
         nowElapsedMs: Long = SystemClock.elapsedRealtime(),
-        trigger: (ChannelConfig) -> Unit,
+        trigger: (AlarmConfig) -> Unit,
     ): Boolean {
         if (state != TimerState.RUNNING) return false
 

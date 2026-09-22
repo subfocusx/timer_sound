@@ -1,6 +1,8 @@
 # Gradle
 .gradle/
 build/
+gradle-*/
+!gradle/wrapper
 
 # Android / IDE
 .idea/
@@ -11,12 +13,13 @@ build/
 # Kotlin
 .kotlin/
 
-# Локальные пути окружения (машино-специфичны)
+# Local env
 local.properties
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Логи
+# Logs
 *.log
+
