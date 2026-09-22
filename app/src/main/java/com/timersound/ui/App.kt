@@ -16,12 +16,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.Switch
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -29,6 +31,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.DisposableEffect
 import com.timersound.audio.PreviewPlayer
 import androidx.compose.runtime.Composable
@@ -68,6 +72,7 @@ fun App(vm: TimerViewModel = viewModel()) {
     var pendingAlarmId by remember { mutableStateOf<Int?>(null) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showDeleteAllDialog by remember { mutableStateOf(false) }
+    var showHelpDialog by remember { mutableStateOf(false) }
     var deleteTargetId by remember { mutableStateOf<Int?>(null) }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -95,6 +100,13 @@ fun App(vm: TimerViewModel = viewModel()) {
                 ),
                 actions = {
                     StatusBadge(state = runtime.state)
+                    IconButton(onClick = { showHelpDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "Справка",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 },
             )
         },
@@ -180,6 +192,10 @@ fun App(vm: TimerViewModel = viewModel()) {
             },
             onDismiss = { showDeleteAllDialog = false },
         )
+    }
+
+    if (showHelpDialog) {
+        HelpDialog(onDismiss = { showHelpDialog = false })
     }
 }
 
@@ -382,5 +398,41 @@ private fun NotificationPermissionRequest() {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ help dialog
+
+@Composable
+private fun HelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Как пользоваться Timer Sound") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("📌 Режимы работы:")
+                Text("• Повтор — бесконечное воспроизведение с интервалом", style = MaterialTheme.typography.bodySmall)
+                Text("• Один раз — звук в заданное время", style = MaterialTheme.typography.bodySmall)
+                Text("• N раз — повторение заданное количество раз", style = MaterialTheme.typography.bodySmall)
+                Text("• Случайно — случайные моменты в заданном окне времени", style = MaterialTheme.typography.bodySmall)
+                
+                Text("⏰ Ввод времени:")
+                Text("Вводите только цифры — двоеточие добавится автоматически.", style = MaterialTheme.typography.bodySmall)
+                Text("Пример: 930 → 09:30, 1430 → 14:30", style = MaterialTheme.typography.bodySmall)
+                
+                Text("🔊 Фоновый режим:")
+                Text("Приложение работает в фоне даже при выключенном экране.", style = MaterialTheme.typography.bodySmall)
+                Text("Для старых телефонов (Huawei, Xiaomi) рекомендуется:", style = MaterialTheme.typography.bodySmall)
+                Text("1. Закрепить приложение в памяти", style = MaterialTheme.typography.bodySmall)
+                Text("2. Отключить экономию батареи для приложения", style = MaterialTheme.typography.bodySmall)
+                Text("3. Разрешить автозапуск", style = MaterialTheme.typography.bodySmall)
+                
+                Text("🛑 Авто-остановка:")
+                Text("Установите лимит времени — таймер остановится автоматически.", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Понятно") }
+        },
+    )
 }
 

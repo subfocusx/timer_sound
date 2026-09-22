@@ -207,70 +207,44 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- все сеттеры по id ---
+    // --- все сеттеры по id через общий метод editAlarm ---
 
-    fun setMode(id: Int, mode: SceneMode) {
+    private fun editAlarm(id: Int, transform: (AlarmConfig) -> AlarmConfig) {
         if (editingLocked) { refuseEdit(); return }
         update { cfg ->
             cfg.copy(alarms = cfg.alarms.map { ch ->
-                if (ch.id == id) ch.copy(mode = mode) else ch
+                if (ch.id == id) transform(ch) else ch
             })
         }
+    }
+
+    fun setMode(id: Int, mode: SceneMode) {
+        editAlarm(id) { it.copy(mode = mode) }
     }
 
     fun setStartMinutes(id: Int, minutes: Int?) {
-        if (editingLocked) { refuseEdit(); return }
-        update { cfg ->
-            cfg.copy(alarms = cfg.alarms.map { ch ->
-                if (ch.id == id) ch.copy(startMinutes = minutes) else ch
-            })
-        }
+        editAlarm(id) { it.copy(startMinutes = minutes) }
     }
 
     fun setEndMinutes(id: Int, minutes: Int?) {
-        if (editingLocked) { refuseEdit(); return }
-        update { cfg ->
-            cfg.copy(alarms = cfg.alarms.map { ch ->
-                if (ch.id == id) ch.copy(endMinutes = minutes) else ch
-            })
-        }
+        editAlarm(id) { it.copy(endMinutes = minutes) }
     }
 
     fun setLaunchCount(id: Int, count: Int) {
-        if (editingLocked) { refuseEdit(); return }
-        update { cfg ->
-            cfg.copy(alarms = cfg.alarms.map { ch ->
-                if (ch.id == id) ch.copy(launchCount = count) else ch
-            })
-        }
+        editAlarm(id) { it.copy(launchCount = count) }
     }
 
     /** Изменение интервала сценария по id (одна функция вместо setInterval+setIntervalAt). */
     fun setInterval(id: Int, ms: Long) {
-        if (editingLocked) { refuseEdit(); return }
-        update { cfg ->
-            cfg.copy(alarms = cfg.alarms.map { ch ->
-                if (ch.id == id) ch.copy(intervalMs = ms.coerceAtLeast(Defaults.MIN_INTERVAL_MS)) else ch
-            })
-        }
+        editAlarm(id) { it.copy(intervalMs = ms.coerceAtLeast(Defaults.MIN_INTERVAL_MS)) }
     }
 
     fun setVolume(id: Int, percent: Int) {
-        if (editingLocked) { refuseEdit(); return }
-        update { cfg ->
-            cfg.copy(alarms = cfg.alarms.map { ch ->
-                if (ch.id == id) ch.copy(volumePercent = percent.coerceIn(0, 100)) else ch
-            })
-        }
+        editAlarm(id) { it.copy(volumePercent = percent.coerceIn(0, 100)) }
     }
 
     fun setEnabled(id: Int, enabled: Boolean) {
-        if (editingLocked) { refuseEdit(); return }
-        update { cfg ->
-            cfg.copy(alarms = cfg.alarms.map { ch ->
-                if (ch.id == id) ch.copy(enabled = enabled) else ch
-            })
-        }
+        editAlarm(id) { it.copy(enabled = enabled) }
     }
 
     fun setAutoStop(ms: Long) {

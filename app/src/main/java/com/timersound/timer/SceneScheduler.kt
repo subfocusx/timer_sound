@@ -33,7 +33,11 @@ object SceneScheduler {
 
     /** Первое срабатывание REPEAT: сразу (null) или в ближайшее HH:MM. */
     fun initialRepeatFire(nowElapsedMs: Long, nowWallMs: Long, startMinutes: Int?): Long =
-        if (startMinutes == null) nowElapsedMs else nextClockElapsed(nowElapsedMs, nowWallMs, startMinutes)
+        if (startMinutes == null) {
+            // Режим "Повтор без времени" начинает играть немедленно — это ожидаемое поведение.
+            // Добавляем минимальную задержку 500ms, чтобы пользователь успел осознать старт.
+            nowElapsedMs + 500L
+        } else nextClockElapsed(nowElapsedMs, nowWallMs, startMinutes)
 
     /** Моменты конечных режимов (ONCE/INTERVAL/RANDOM), по возрастанию. REPEAT -> пустой. */
     fun fireTimesFor(alarm: AlarmConfig, nowElapsedMs: Long, nowWallMs: Long): List<Long> {
@@ -64,7 +68,15 @@ object SceneScheduler {
     fun randomMinutes(span: Int, n: Int, seed: Long): MutableList<Int> {
         val random = Random(seed)
         val picked = mutableSetOf<Int>()
-        while (picked.size < n) picked += random.nextInt(span)
+        val maxAttempts = span * 10 // Защита от бесконечного цикла при невозможных параметрах
+        var attempts = 0
+        while (picked.size < n && attempts < maxAttempts) {
+            picked += random.nextInt(span.coerceAtLeast(1))
+            attempts++
+        }
+        if (attempts >= maxAttempts) {
+            throw IllegalStateException("randomMinutes: не удалось сгенерировать $n уникальных значений в диапазоне $span за $maxAttempts попыток")
+        }
         return picked.toMutableList()
     }
 
