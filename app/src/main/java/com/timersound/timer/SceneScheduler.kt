@@ -31,13 +31,19 @@ object SceneScheduler {
         return wall + offset(nowElapsedMs, nowWallMs)
     }
 
-    /** Первое срабатывание REPEAT: сразу (null) или в ближайшее HH:MM. */
-    fun initialRepeatFire(nowElapsedMs: Long, nowWallMs: Long, startMinutes: Int?): Long =
-        if (startMinutes == null) {
-            // Режим "Повтор без времени" начинает играть немедленно — это ожидаемое поведение.
-            // Добавляем минимальную задержку 500ms, чтобы пользователь успел осознать старт.
-            nowElapsedMs + 500L
-        } else nextClockElapsed(nowElapsedMs, nowWallMs, startMinutes)
+    /**
+     * Первое срабатывание REPEAT: через один интервал (если время старта не задано) или в ближайшее HH:MM.
+     * Без времени старта звук НЕ играет в момент нажатия «Старт» — первое воспроизведение
+     * происходит спустя intervalMs, дальше по тому же шагу.
+     */
+    fun initialRepeatFire(
+        nowElapsedMs: Long,
+        nowWallMs: Long,
+        startMinutes: Int?,
+        intervalMs: Long,
+    ): Long = if (startMinutes == null) {
+        nowElapsedMs + intervalMs.coerceAtLeast(1_000L)
+    } else nextClockElapsed(nowElapsedMs, nowWallMs, startMinutes)
 
     /** Моменты конечных режимов (ONCE/INTERVAL/RANDOM), по возрастанию. REPEAT -> пустой. */
     fun fireTimesFor(alarm: AlarmConfig, nowElapsedMs: Long, nowWallMs: Long): List<Long> {
@@ -52,16 +58,39 @@ object SceneScheduler {
             SceneMode.RANDOM -> {
                 val start = requireStart(alarm)
                 val end = requireEnd(alarm)
-                val span = end - start
-                val count = alarm.launchCount.coerceIn(1, span)
                 val dayStartWall = localMidnightWall(nowWallMs)
-                val windowStartWall = dayStartWall + start.toLong() * MS_PER_MIN
-                val originWall = if (windowStartWall > nowWallMs) windowStartWall else windowStartWall + MS_PER_DAY
-                return randomMinutes(span, count, dayStartWall).sorted()
+                val minuteSlots = (start until end).toList()
+                // Сегодня доступны только минуты окна, которые ещё не наступили (если сейчас внутри окна — остаток).
+                val windowEndToday = dayStartWall + end.toLong() * MS_PER_MIN
+                val todayCandidates = if (windowEndToday > nowWallMs) {
+                    minuteSlots.filter { dayStartWall + it.toLong() * MS_PER_MIN > nowWallMs }
+                } else {
+                    emptyList()
+                }
+                // Слотов сегодня не осталось (окно прошло или истекло) — планируем на завтра:
+                // пустое расписание было бы тихим отказом, когда звука нет вообще.
+                val originWall = if (todayCandidates.isEmpty()) dayStartWall + MS_PER_DAY else dayStartWall
+                val candidates = todayCandidates.ifEmpty { minuteSlots }
+                val count = alarm.launchCount.coerceIn(1, candidates.size)
+                return randomMinuteSlots(candidates, count, seed = originWall).sorted()
                     .map { originWall + it.toLong() * MS_PER_MIN + offset(nowElapsedMs, nowWallMs) }
             }
             SceneMode.REPEAT -> return emptyList()
         }
+    }
+
+    /** n различных случайных минут из готового пула кандидатов. Детерминированно от seed. */
+    fun randomMinuteSlots(candidates: List<Int>, n: Int, seed: Long): List<Int> {
+        val random = Random(seed)
+        val pool = candidates.toMutableList()
+        // Перемешивание Фишера—Йетса: детерминированно, без повторов и без риска зацикливания.
+        for (i in pool.size - 1 downTo 1) {
+            val j = random.nextInt(i + 1)
+            val tmp = pool[i]
+            pool[i] = pool[j]
+            pool[j] = tmp
+        }
+        return pool.take(n.coerceIn(1, pool.size))
     }
 
     /** n различных случайных минут в [0, span). Детерминированно от seed. */

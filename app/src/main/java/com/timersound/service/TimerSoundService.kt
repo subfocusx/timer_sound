@@ -130,12 +130,11 @@ class TimerSoundService : Service() {
             acquireWakeLock()
             setupMediaSession(playing = true)
             startAsForeground()
-            // Первый тик — сразу после старта: режим REPEAT без времени начала
-            // срабатывает мгновенно. Здесь важен ТОЛЬКО факт завершения сессии:
-            // срабатывание канала — не повод её останавливать (иначе первый же
-            // звук глушился releaseAll() и сессия уходила в COMPLETED).
+            // Первый тик — сразу после старта: здесь важен ТОЛЬКО факт завершения
+            // сессии. Срабатывание канала — не повод её останавливать (иначе первый
+            // же звук глушился releaseAll() и сессия уходила в COMPLETED).
             if (handleTick()) {
-                handleAutoStop()
+                handleAutoStop(playOutLastRing = true)
                 return@launch
             }
             startTickLoop()
@@ -188,12 +187,52 @@ class TimerSoundService : Service() {
         stopSelf()
     }
 
-    /** Авто-остановка из тик-цикла: вызывается после того, как старт завершён. */
-    private fun handleAutoStop() {
+    /**
+     * Завершение сессии: сценарий отыгран целиком либо сработала авто-остановка.
+     *
+     * [playOutLastRing] = true, когда сессию закрыло её собственное последнее
+     * срабатывание (ONCE_TIME / INTERVAL / RANDOM). Такой звук только что
+     * стартовал и должен доиграть файл: без этого `handleStop` вызывался тем же
+     * тиком, который запустил Ringtone, — `releaseAll()` глушил его мгновенно, и
+     * режимы «Один раз»/«N раз»/«Случайно» выглядели как «звука нет».
+     *
+     * Авто-остановка по таймеру ([playOutLastRing] = false) глушит всё сразу —
+     * так задумано: пользователь задал момент остановки.
+     */
+    private fun handleAutoStop(playOutLastRing: Boolean = false) {
         stopTickLoop()
         cancelExactAlarm()
         publishUiSnapshot(stateOverride = TimerState.COMPLETED)
-        handleStop(completed = true)
+        if (!playOutLastRing) {
+            handleStop(completed = true)
+            return
+        }
+        // Сессия завершена: FGS-уведомление снимаем сразу, но процесс доживает
+        // последний звук (Ringtone играет файл один раз) и только потом уходит.
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        showCompletedNotification()
+        TimerStateHolder.setState(TimerState.COMPLETED)
+        scope.launch {
+            awaitLastRingFinished()
+            // Пока звук доигрывал, пользователь мог нажать «Стоп» или «Запустить заново»:
+            // тогда teardown уже сделан (или начата новая сессия) — не трогаем.
+            if (session.state == TimerState.COMPLETED) handleStop(completed = true)
+        }
+    }
+
+    /**
+     * Ждём естественного конца последнего срабатывания. Потолок [MAX_LAST_RING_MS]
+     * страхует от «вечного» Ringtone (битый/очень длинный файл), пол [MIN_LAST_RING_MS] —
+     * от устройств, где `Ringtone.isPlaying()` не успевает/не умеет отвечать true.
+     */
+    private suspend fun awaitLastRingFinished() {
+        val startedAt = SystemClock.elapsedRealtime()
+        while (true) {
+            val elapsed = SystemClock.elapsedRealtime() - startedAt
+            if (elapsed >= MAX_LAST_RING_MS) return
+            if (elapsed >= MIN_LAST_RING_MS && !AudioEngine.isAnyPlaying()) return
+            delay(100)
+        }
     }
 
     // ------------------------------------------------------------------ tick loop
@@ -204,20 +243,26 @@ class TimerSoundService : Service() {
             var counter = 0
             while (isActive) {
                 val now = SystemClock.elapsedRealtime()
-                val autoStopped: Boolean = if (session.isRunning) {
+                val autoStopDeadlineHit: Boolean = if (session.isRunning) {
                     val autoStopDeadline = session.countdownToAutoStopMs(now)
-                    if (autoStopDeadline != null && autoStopDeadline <= 0L) {
-                        true
-                    } else {
-                        // Возврат handleTick означает, что серия отработала/сессия завершена:
-                        // его НЕЛЬЗЯ терять, иначе сервис останется висеть FGS со старым уведомлением.
-                        handleTick(now)
-                    }
+                    autoStopDeadline != null && autoStopDeadline <= 0L
                 } else {
                     false
                 }
-                if (autoStopped) {
-                    handleAutoStop()
+                val scenarioCompleted: Boolean = if (session.isRunning && !autoStopDeadlineHit) {
+                    // Возврат handleTick означает, что серия отработала/сессия завершена:
+                    // его НЕЛЬЗЯ терять, иначе сервис останется висеть FGS со старым уведомлением.
+                    handleTick(now)
+                } else {
+                    false
+                }
+                if (autoStopDeadlineHit) {
+                    handleAutoStop(playOutLastRing = false)
+                    return@launch
+                }
+                if (scenarioCompleted) {
+                    // Серия закрылась последним срабатыванием — даём звуку доиграть.
+                    handleAutoStop(playOutLastRing = true)
                     return@launch
                 }
                 if (session.isActive) {
@@ -228,7 +273,7 @@ class TimerSoundService : Service() {
                     // Сессия завершилась/сброшена вне тик-цикла (алярм, авто-остановка, STOP):
                     // публикуем актуальное состояние и выходим, не держа FGS вхолостую.
                     publishUiSnapshot(stateOverride = session.state)
-                    if (session.state == TimerState.COMPLETED) handleAutoStop()
+                    if (session.state == TimerState.COMPLETED) handleAutoStop(playOutLastRing = true)
                     return@launch
                 }
                 counter++
@@ -263,7 +308,7 @@ class TimerSoundService : Service() {
         Log.i(TAG, "alarmFired=true state=${session.state} nextEventElapsedMs=${session.nextEventElapsedMs()} wall=${System.currentTimeMillis()}")
         handleTick()
         if (session.state == TimerState.COMPLETED) {
-            handleAutoStop()
+            handleAutoStop(playOutLastRing = true)
         } else {
             scheduleExactAlarm()
         }
@@ -368,7 +413,7 @@ class TimerSoundService : Service() {
 
     private fun showCompletedNotification() {
         val title = "Timer Sound: завершено"
-        val text = "Авто-остановка: все каналы остановлены."
+        val text = "Серия срабатываний завершена, все каналы остановлены."
         val n = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_timer)
             .setContentTitle(title)
@@ -498,6 +543,12 @@ class TimerSoundService : Service() {
         const val ACTION_RESET = "com.timersound.intent.RESET"
         const val ACTION_TICK = "com.timersound.intent.TICK"
         private const val ALARM_TICK_REQUEST_CODE = 4001
+
+        /** Минимум, который последнее срабатывание должно отзвучать перед teardown. */
+        private const val MIN_LAST_RING_MS = 1_500L
+
+        /** Потолок ожидания конца последнего сигнала (защита от «вечного» Ringtone). */
+        private const val MAX_LAST_RING_MS = 120_000L
         const val NOTIFICATION_ID = 1001
         const val COMPLETED_NOTIFICATION_ID = 1002
         const val CHANNEL_ID = "timer_running"

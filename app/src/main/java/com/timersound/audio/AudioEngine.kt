@@ -79,6 +79,16 @@ object AudioEngine {
         }
     }
 
+    /**
+     * true, пока звучит хотя бы один сценарный сигнал (не preview).
+     * Нужен сервису, чтобы дать последнему срабатыванию конечного режима
+     * (Один раз / N раз / Случайно) доиграть файл, а не глушить его тем же
+     * тиком, который его запустил.
+     */
+    fun isAnyPlaying(): Boolean = synchronized(lock) {
+        players.values.any { runCatching { it.isPlaying() }.getOrDefault(false) }
+    }
+
     /** Stop and release a specific channel. */
     fun stopChannel(channelId: Int) {
         synchronized(lock) {

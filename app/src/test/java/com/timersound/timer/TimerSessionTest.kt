@@ -60,15 +60,21 @@ class TimerSessionTest {
         assertTrue(session.isRunning)
         assertTrue(session.isActive)
 
-        // REPEAT без окна стартует немедленно.
+        // REPEAT без окна старта ждёт один интервал — звука в момент старта нет.
         val fired = mutableListOf<Int>()
         session.tick(now) { fired += it.id }
+        assertTrue(fired.isEmpty())
+
+        // Первое срабатывание — ровно через интервал.
+        assertFalse(session.tick(now + 19_999L) { fired += it.id })
+        assertTrue(fired.isEmpty())
+        session.tick(now + 20_000L) { fired += it.id }
         assertEquals(listOf(0), fired)
 
-        // Следующее срабатывание — через интервал.
-        assertFalse(session.tick(now + 19_999L) { fired += it.id })
+        // Следующее — ещё через интервал.
+        assertFalse(session.tick(now + 39_999L) { fired += it.id })
         assertEquals(listOf(0), fired)
-        session.tick(now + 20_000L) { fired += it.id }
+        session.tick(now + 40_000L) { fired += it.id }
         assertEquals(listOf(0, 0), fired)
     }
 
@@ -96,10 +102,10 @@ class TimerSessionTest {
         val now = 0L
         session.start(config(listOf(alarm(0, intervalMs = 5_000L))), now)
 
-        // Пропуск тиков: с учётом немедленного старта за 25 с проходит 6 срабатываний.
+        // Пропуск тиков: без немедленного старта за 25 с проходит 5 срабатываний (5, 10, 15, 20, 25).
         val fired = mutableListOf<Int>()
         session.tick(now + 25_000L) { fired += it.id }
-        assertEquals(6, fired.size)
+        assertEquals(5, fired.size)
     }
 
     @Test
@@ -111,11 +117,11 @@ class TimerSessionTest {
 
         val fired = mutableListOf<Int>()
         session.tick(now) { fired += it.id }
-        assertEquals(listOf(0), fired)
+        assertTrue(fired.isEmpty())
         session.tick(now + 999L) { fired += it.id }
-        assertEquals(1, fired.size)
+        assertTrue(fired.isEmpty())
         session.tick(now + 1_000L) { fired += it.id }
-        assertEquals(2, fired.size)
+        assertEquals(1, fired.size)
     }
 
     @Test
@@ -136,8 +142,9 @@ class TimerSessionTest {
         session.tick(now + 10_000L) { fired[it.id] = (fired[it.id] ?: 0) + 1 }
         session.tick(now + 20_000L) { fired[it.id] = (fired[it.id] ?: 0) + 1 }
 
-        assertEquals(3, fired[0])
-        assertEquals(2, fired[1])
+        // ch0 (10 с): срабатывания на 10 и 20 с; ch1 (20 с): только на 20 с.
+        assertEquals(2, fired[0])
+        assertEquals(1, fired[1])
     }
 
     @Test
@@ -155,8 +162,8 @@ class TimerSessionTest {
         session.start(cfg, 0L)
         val fired = mutableListOf<Int>()
         session.tick(60_000L) { fired += it.id }
-        // disabled (1) и без файла (2) не звучат; REPEAT уже сработал при старте.
-        assertEquals(listOf(0, 0), fired)
+        // disabled (1) и без файла (2) не звучат; REPEAT срабатывает через свой интервал (60 с).
+        assertEquals(listOf(0), fired)
     }
 
     // ---------------------------------------------------------------- pause / resume
@@ -167,11 +174,10 @@ class TimerSessionTest {
         val now = 0L
         session.start(config(listOf(alarm(0, intervalMs = 10_000L))), now)
 
-        // Первый REPEAT-звук срабатывает сразу; затем пауза на 3-й секунде.
+        // Первый REPEAT-звук — через интервал (10 с); пауза на 3-й секунде.
         val fired = mutableListOf<Int>()
         session.tick(now) { fired += it.id }
-        assertEquals(listOf(0), fired)
-        fired.clear()
+        assertTrue(fired.isEmpty())
         session.pause(now + 3_000L)
         assertEquals(TimerState.PAUSED, session.state)
         assertFalse(session.isRunning)
@@ -282,7 +288,8 @@ class TimerSessionTest {
         )
         val desc = session.nextSoundDescription(now + 3_000L)
         assertNotNull(desc)
-        assertTrue("ожидается «Канал 1» в описании: $desc", desc.contains("Канал 1"))
+        // alarm(1) отображается как «Канал 2» (id + 1) и сейчас ближе: 10 с против 30 с.
+        assertTrue("ожидается «Канал 2» в описании: $desc", desc.contains("Канал 2"))
         assertTrue(desc.contains("через"))
     }
 
@@ -302,13 +309,18 @@ class TimerSessionTest {
     // ---------------------------------------------------------------- schedule modes
 
     @Test
-    fun repeatWithoutStartTimeFiresImmediately() {
+    fun repeatWithoutStartTimeWaitsOneInterval() {
         val session = TimerSession()
-        session.start(config(listOf(alarm(0))), 0L)
+        session.start(config(listOf(alarm(0, intervalMs = 10_000L))), 0L)
 
         val fired = mutableListOf<Int>()
         session.tick(0L) { fired += it.id }
+        assertTrue(fired.isEmpty())
 
+        session.tick(9_999L) { fired += it.id }
+        assertTrue(fired.isEmpty())
+
+        session.tick(10_000L) { fired += it.id }
         assertEquals(listOf(0), fired)
     }
 
@@ -423,5 +435,60 @@ class TimerSessionTest {
         // Округление вниз и отрицательные значения.
         assertEquals("00:00:01", TimerSession.formatHms(1_999L))
         assertEquals("00:00:00", TimerSession.formatHms(-5_000L))
+    }
+
+    // ------------------------------------------------- человеческое описание следующего звука
+
+    @Test
+    fun describeWallMomentUsesRelativePhrasesForNearFires() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val now = epochUtc(2026, 9, 21, 10, 0, 0)
+
+        assertEquals("через 30 с", TimerSession.describeWallMoment(now + 30_000L, now))
+        assertEquals("через 12 мин", TimerSession.describeWallMoment(now + 12 * 60_000L, now))
+        assertEquals("через 59 мин", TimerSession.describeWallMoment(now + 59 * 60_000L, now))
+    }
+
+    @Test
+    fun describeWallMomentNamesDayForDistantFires() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val now = epochUtc(2026, 9, 21, 10, 0, 0)
+
+        assertEquals("сегодня в 14:05", TimerSession.describeWallMoment(epochUtc(2026, 9, 21, 14, 5, 0), now))
+        assertEquals("завтра в 01:19", TimerSession.describeWallMoment(epochUtc(2026, 9, 22, 1, 19, 0), now))
+        assertEquals("25.09 в 07:00", TimerSession.describeWallMoment(epochUtc(2026, 9, 25, 7, 0, 0), now))
+    }
+
+    @Test
+    fun descriptionSaysTomorrowWhenOnceTimeAlreadyPassed() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val session = TimerSession()
+        val nowElapsed = 0L
+        // 01:30 на часах, цель 01:19 уже прошла → сегодня не сработает.
+        val nowWall = epochUtc(2026, 9, 21, 1, 30, 0)
+        session.start(
+            config(listOf(alarm(0, mode = SceneMode.ONCE_TIME, startMinutes = 79))),
+            nowElapsed,
+            nowWall,
+        )
+
+        val desc = session.nextSoundDescription(nowElapsed)
+
+        assertTrue("ожидается «завтра в 01:19», получено: $desc", desc.contains("завтра в 01:19"))
+    }
+
+    @Test
+    fun descriptionSaysSecondsWhenOnceTimeIsImminent() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val session = TimerSession()
+        val nowElapsed = 0L
+        val nowWall = epochUtc(2026, 9, 21, 1, 19, 30)
+        session.start(
+            config(listOf(alarm(0, mode = SceneMode.ONCE_TIME, startMinutes = 80))),
+            nowElapsed,
+            nowWall,
+        )
+
+        assertEquals("Канал 1: через 30 с", session.nextSoundDescription(nowElapsed))
     }
 }

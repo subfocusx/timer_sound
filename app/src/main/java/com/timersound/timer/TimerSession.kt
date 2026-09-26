@@ -36,6 +36,9 @@ class TimerSession {
     var startedElapsedMs: Long = 0L
         private set
 
+    /** Wall-время старта: нужно, чтобы переводить elapsed-моменты в «человеческое» время. */
+    private var startedWallMs: Long = 0L
+
     private var autoStopDeadlineElapsedMs = Long.MAX_VALUE
     private var remainingAutoStopOnPauseMs = Long.MAX_VALUE
     private val scheduled = mutableListOf<Scheduled>()
@@ -62,6 +65,7 @@ class TimerSession {
                             nowElapsedMs,
                             nowWallMs,
                             ch.startMinutes,
+                            ch.intervalMs,
                         ),
                     )
                 } else if (fires.isNotEmpty()) {
@@ -73,6 +77,7 @@ class TimerSession {
                 }
             }
         startedElapsedMs = nowElapsedMs
+        startedWallMs = nowWallMs
         autoStopDeadlineElapsedMs =
             if (config.autoStopMs > 0) nowElapsedMs + config.autoStopMs else Long.MAX_VALUE
         state = TimerState.RUNNING
@@ -197,10 +202,15 @@ class TimerSession {
     /** Общий следующий звук (ближайший по времени) для строки уведомления. */
     @Synchronized
     fun nextSoundDescription(nowElapsedMs: Long = SystemClock.elapsedRealtime()): String {
-        val next = nextEventElapsedMs(nowElapsedMs) ?: return "—"
-        val remain = (next - nowElapsedMs).coerceAtLeast(0L)
-        val channel = scheduled.minByOrNull { it.nextFireElapsedMs }?.config ?: return "—"
-        return "${channel.name}: через ${formatHms(remain)}"
+        val s = scheduled.minByOrNull { it.nextFireElapsedMs } ?: return "—"
+        val phrase = if (startedWallMs == 0L) {
+            "через ${formatHms((s.nextFireElapsedMs - nowElapsedMs).coerceAtLeast(0L))}"
+        } else {
+            // elapsed → wall по шкале сессии (не по реальным часам: они совпадают только вне тестов).
+            val nowWallHere = startedWallMs + (nowElapsedMs - startedElapsedMs)
+            describeWallMoment(startedWallMs + (s.nextFireElapsedMs - startedElapsedMs), nowWallHere)
+        }
+        return "${s.config.name}: $phrase"
     }
 
     companion object {
@@ -210,6 +220,40 @@ class TimerSession {
             val m = (totalSec % 3600) / 60
             val s = totalSec % 60
             return "%02d:%02d:%02d".format(h, m, s)
+        }
+
+        /**
+         * Человеческое описание момента: «через 30 с», «через 12 мин»,
+         * «сегодня в 14:05», «завтра в 01:19», «25.09 в 07:00».
+         * Без этого строка «через 23:53:32» читается как «через 23 минуты».
+         */
+        fun describeWallMoment(targetWallMs: Long, nowWallMs: Long = System.currentTimeMillis()): String {
+            val remain = targetWallMs - nowWallMs
+            if (remain < 60_000L) return "через ${(remain / 1000).coerceAtLeast(0L)} с"
+            if (remain < 60 * 60_000L) return "через ${remain / 60_000L} мин"
+            val zone = java.util.TimeZone.getDefault()
+            fun cal(ms: Long, plusDays: Int = 0) = java.util.Calendar.getInstance(zone).apply {
+                timeInMillis = ms
+                add(java.util.Calendar.DAY_OF_YEAR, plusDays)
+            }
+            val target = cal(targetWallMs)
+            val today = cal(nowWallMs)
+            val time = "%02d:%02d".format(
+                target.get(java.util.Calendar.HOUR_OF_DAY),
+                target.get(java.util.Calendar.MINUTE),
+            )
+            val sameDay = target.get(java.util.Calendar.YEAR) == today.get(java.util.Calendar.YEAR) &&
+                target.get(java.util.Calendar.DAY_OF_YEAR) == today.get(java.util.Calendar.DAY_OF_YEAR)
+            if (sameDay) return "сегодня в $time"
+            val tomorrow = cal(nowWallMs, 1)
+            val isTomorrow = target.get(java.util.Calendar.YEAR) == tomorrow.get(java.util.Calendar.YEAR) &&
+                target.get(java.util.Calendar.DAY_OF_YEAR) == tomorrow.get(java.util.Calendar.DAY_OF_YEAR)
+            if (isTomorrow) return "завтра в $time"
+            return "%02d.%02d в %s".format(
+                target.get(java.util.Calendar.DAY_OF_MONTH),
+                target.get(java.util.Calendar.MONTH) + 1,
+                time,
+            )
         }
     }
 }

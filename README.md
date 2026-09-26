@@ -12,7 +12,7 @@ Kotlin + Jetpack Compose (Material 3) + Android Foreground Service.
   Лимит — 100. Имена персистят, id стабильны и не переиспользуются.
   У каждого будильника:
   - свой аудиофайл (MP3 / WAV / OGG через системный файловый пикер, права на чтение — persistable, файлы не копируются);
-  - свой интервал `ЧЧ:ММ:СС` (пресеты 1/3/5/10/15/30 мин);
+  - свой интервал `ЧЧ:ММ:СС` (ввод цифрами по маске, `130` → `1:30`; тап по заполненному полю заменяет значение целиком);
   - своя громкость 0–100 %;
   - переключатель ВКЛ/ВЫКЛ;
   - режим сценария (Повтор / Один раз / N раз / Случайно) с режим-специфичными полями;
@@ -46,10 +46,18 @@ Kotlin + Jetpack Compose (Material 3) + Android Foreground Service.
 
 | Режим | Название | Описание |
 |---|---|---|
-| REPEAT | Повтор | Звук повторяется через intervalMs без ограничения. Опционально: старт по времени HH:MM (startMinutes). |
+| REPEAT | Повтор | Звук повторяется через intervalMs без ограничения. Без времени старта первое срабатывание — через один интервал; с временем HH:MM (startMinutes) — в ближайшее наступление этого времени. |
 | ONCE_TIME | Время | Один звук в заданное время HH:MM. |
 | INTERVAL | Интервал | Первый звук в HH:MM, далее каждый intervalMs, всего launchCount раз. |
 | RANDOM | Рандом | launchCount случайных различных моментов строго внутри окна [startMinutes, endMinutes) одного дня; моменты фиксируются один раз при старт. |
+
+**Последнее срабатывание конечного режима доигрывает файл.** Серия
+(ONCE_TIME / INTERVAL / RANDOM) завершается не мгновенно в момент последнего
+звука: сервис доживает естественный конец `Ringtone` (но не дольше
+`MAX_LAST_RING_MS` = 2 мин) и только потом освобождает аудио и уходит. Раньше
+`releaseAll()` вызывался тем же тиком, который запустил Ringtone, — плеер жил
+40–50 мс и режимы «Один раз»/«N раз»/«Случайно» выглядели как «звука нет».
+Авто-остановка по таймеру, наоборот, глушит всё немедленно.
 
 ---
 
@@ -58,7 +66,8 @@ Kotlin + Jetpack Compose (Material 3) + Android Foreground Service.
 ```
 IDLE --Старт--> RUNNING --Пауза--> PAUSED --Продолжить--> RUNNING
 RUNNING/PAUSED --Стоп--> IDLE
-RUNNING --авто-остановка--> COMPLETED (всё остановлено, уведомление, пометка «Завершено»)
+RUNNING --авто-остановка по таймеру--> COMPLETED (всё остановлено сразу, уведомление, пометка «Завершено»)
+RUNNING --последнее срабатывание конечной серии--> COMPLETED (состояние и уведомление сразу, звук доигрывает, затем teardown)
 COMPLETED --Старт/Сброс--> RUNNING/IDLE
 ```
 
@@ -73,9 +82,9 @@ COMPLETED --Старт/Сброс--> RUNNING/IDLE
 | Timer-session | `timer/TimerSession.kt` | Движок расписаний (REPEAT / ONCE_TIME / INTERVAL / RANDOM): планирование срабатываний по `elapsedRealtime`, пауза/резюме без «протухания» моментов, авто-остановка. UI не является источником истины. |
 | SceneScheduler | `timer/SceneScheduler.kt` | Чистая математика расписаний без Android: «стенные» минуты → elapsed-шкала, моменты серии для каждого режима. |
 | Foreground Service | `service/TimerSoundService.kt` | Жизненный цикл сессии, FGS + уведомление с кнопками, тик-цикл, AlarmManager.setAlarmClock, MediaSession, wakelock. PreviewPlayer.stop() при старте сессии. |
-| Preferences | `data/PreferencesRepository.kt` | DataStore + JSON (`alarms_json`): сценарии (alarms), schema_version, next_alarm_id, авто-остановка. Миграция v1→v2 (legacy ch{i}_* → alarms). |
+| Preferences | `data/PreferencesRepository.kt` | DataStore + JSON (`alarms_json`): сценарии (alarms), schema_version, next_alarm_id, авто-остановка. Миграция v1→v2 (legacy ch{i}_* → alarms). Битый файл настроек подменяется пустым (`ReplaceFileCorruptionHandler`) — приложение не падает при старте, дальше работает фолбэк на дефолты. |
 | Мост сервис→UI | `service/TimerStateHolder.kt` | In-process `StateFlow`: сервис пишет, UI читает. |
-| Тесты | `test/.../{timer/TimerSessionTest, timer/SceneSchedulerTest, data/PreferencesRepositoryTest, model/TimerConfigTest}.kt` | Юнит-тесты машины состояний, расписаний, настроек и валидации конфига на чистой логике, с явными значениями времени. |
+| Тесты | `app/src/test/java/com/timersound/**` (`TimerViewModelTest`, `timer/TimerSessionTest`, `timer/SceneSchedulerTest`, `timer/AllModesBehaviorTest`, `data/PreferencesRepositoryTest`, `model/TimerConfigTest`, `ui/AlarmCardFormattingTest`) | Юнит-тесты машины состояний, расписаний, настроек и валидации конфига на чистой логике, с явными значениями времени; `TimerViewModelTest` — на Robolectric. Измеренное покрытие: 18,1 % строк / 18,7 % ветвей. |
 
 ## Сборка и запуск
 
@@ -151,14 +160,21 @@ AGP 9.4.0 + Kotlin 2.4.20 (плагин `org.jetbrains.kotlin.plugin.compose`,
 ## Юнит-тесты
 
 ```bash
-./gradlew test           # JUnit 4
+./gradlew test                     # JUnit 4, все unit-тесты
+./gradlew testDebugUnitTest        # прогон с инструментированием JaCoCo
+./gradlew createDebugUnitTestCoverageReport -x testDebugUnitTest   # отчёт покрытия
 ```
 
-Текущее покрытие — 41 тест: `TimerSessionTest` (21), `SceneSchedulerTest` (10),
-`PreferencesRepositoryTest` (6), `TimerConfigTest` (4). `TimerViewModelTest`
-планируется (зависит от Robolectric/Android-эмулятора). Остальные слои
-(Service, AudioEngine, UI) юнит-тестами не покрыты и проверяются вручную на
-устройстве (см. ниже).
+Текущее состояние — 89 тестов: `TimerSessionTest` (25), `SceneSchedulerTest` (16),
+`AlarmCardFormattingTest` (15), `TimerViewModelTest` (12, Robolectric),
+`PreferencesRepositoryTest` (9), `AllModesBehaviorTest` (8), `TimerConfigTest` (4).
+Проходят 83, падают 6 (`TimerViewModelTest` — 4, `PreferencesRepositoryTest` — 2).
+
+Измеренное покрытие: **18,1 % строк / 18,7 % ветвей** по всему production-коду
+(JaCoCo); логическое ядро `TimerSession` / `SceneScheduler` / `TimerConfig` — 88–100 %.
+Остальные слои (Service, AudioEngine, UI) юнит-тестами не покрыты и проверяются вручную
+на устройстве (см. ниже). Детали и ограничения измерения — в
+[TEST_COVERAGE_PERCENTAGE.md](TEST_COVERAGE_PERCENTAGE.md).
 
 `TimerSession` спроектирован без Android-зависимостей (время передаётся
 явным параметром `nowElapsedMs`), поэтому машина состояний и автопланирование
@@ -171,8 +187,9 @@ AGP 9.4.0 + Kotlin 2.4.20 (плагин `org.jetbrains.kotlin.plugin.compose`,
 - TimerSession: все режимы, пауза/резюме, авто-остановка, finite series, форматирование
 - SceneScheduler: wall→elapsed, all modes, deterministic random
 
-Для обновления покрытия: `./gradlew test --rerun-tasks`.
-См. `TEST_COVERAGE_PERCENTAGE.md` для деталей.
+Для обновления покрытия: `./gradlew testDebugUnitTest` (пишет данные JaCoCo), затем
+`./gradlew createDebugUnitTestCoverageReport -x testDebugUnitTest`.
+См. `TEST_COVERAGE_PERCENTAGE.md` для деталей, разбивки по файлам и ограничений измерения.
 
 ## Ручной план проверки (критерии готовности ТЗ §18)
 
@@ -198,8 +215,10 @@ AGP 9.4.0 + Kotlin 2.4.20 (плагин `org.jetbrains.kotlin.plugin.compose`,
     настройки сохранены; автоматического запуска таймера нет.
 11. **Офлайн**: сборка и работа приложения не используют сеть.
 12. **Режимы**: для каждого режима сценария (Повтор / Один раз / N раз / Случайно)
-    задать короткое расписание и убедиться, что звук пришёл в нужный момент,
-    а конечная серия завершилась сама (без «зомби»-сервиса).
+    задать короткое расписание и убедиться, что звук пришёл в нужный момент и
+    **слышен целиком** (проверка на устройстве: в `dumpsys audio` плеер живёт
+    секунды, а не десятки миллисекунд), а конечная серия завершилась сама
+    (без «зомби»-сервиса).
 13. **После завершения/Стоп**: в `dumpsys activity services com.timersound` нет
     ServiceRecord, в шторке только уведомление «Завершено» (id=1002), UI показывает
     «Завершено» / «Запустить заново».

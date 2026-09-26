@@ -3,6 +3,7 @@ package com.timersound.audio
 import android.content.Context
 import android.util.Log
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -11,13 +12,13 @@ import com.timersound.model.Defaults
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.supervisorJob
 
 /**
  * Компонент плеера в карточке (media3 ExoPlayer).
@@ -29,7 +30,7 @@ object PreviewPlayer {
 
     private const val TAG = "PreviewPlayer"
 
-    private val scope = CoroutineScope(Dispatchers.Main + supervisorJob())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private val _state = MutableStateFlow<State?>(null)
     val state: StateFlow<State?> = _state.asStateFlow()
@@ -54,23 +55,6 @@ object PreviewPlayer {
     private fun stopTicker() {
         tickerJob?.cancel()
         tickerJob = null
-    }
-
-    private fun startTicker() {
-        stopTicker()
-        tickerJob = scope.launch {
-            while (isActive) {
-                delay(250)
-                val p = player ?: return@launch
-                val id = currentAlarmId ?: return@launch
-                _state.value = State(
-                    alarmId = id,
-                    isPlaying = p.isPlaying,
-                    positionMs = p.currentPosition,
-                    durationMs = p.duration,
-                )
-            }
-        }
     }
 
     private fun updateState() {
@@ -113,8 +97,8 @@ object PreviewPlayer {
         val exoPlayer = ExoPlayer.Builder(context)
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .setUsage(C.USAGE_MEDIA)
                     .build(),
                 true,
             )

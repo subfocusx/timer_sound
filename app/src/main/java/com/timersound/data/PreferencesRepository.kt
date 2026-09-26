@@ -1,21 +1,29 @@
 package com.timersound.data
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
-import androidx.datastore.preferences.core.preferencesDataStore
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import com.timersound.model.AlarmConfig
 import com.timersound.model.Defaults
 import com.timersound.model.SceneMode
 import com.timersound.model.TimerConfig
 
-private val Context.dataStore by preferencesDataStore(name = "timer_sound")
+private val Context.dataStore by preferencesDataStore(
+    name = "timer_sound",
+    // Битый файл настроек (обрыв записи, повреждённые байты) не должен ронять приложение
+    // при старте: подменяем его пустыми настройками, дальше срабатывает обычный фолбэк на дефолты.
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
 
 private val alarmsJsonKey = stringPreferencesKey("alarms_json")
 private val schemaVersionKey = intPreferencesKey("schema_version")

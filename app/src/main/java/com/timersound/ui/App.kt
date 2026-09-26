@@ -10,9 +10,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -20,6 +23,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Switch
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -47,7 +51,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -60,6 +63,7 @@ import com.timersound.service.TimerStateHolder
 import com.timersound.timer.TimerState
 
 /** Единственный экран приложения: статус, авто-остановка, список будильников, FAB. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App(vm: TimerViewModel = viewModel()) {
     val config by vm.config.collectAsStateWithLifecycle()
@@ -113,7 +117,7 @@ fun App(vm: TimerViewModel = viewModel()) {
         floatingActionButton = {
             AddAlarmFab(
                 count = alarmCount,
-                enabled = canEdit.value && alarmCount < Defaults.MAX_ALARMS,
+                enabled = canEdit && alarmCount < Defaults.MAX_ALARMS,
                 onAdd = { vm.addAlarm() },
             )
         },
@@ -127,6 +131,7 @@ fun App(vm: TimerViewModel = viewModel()) {
                 StatusCard(
                     runtime = runtime,
                     canStart = !isLocked,
+                    locked = isLocked,
                     missing = config.missingFileAlarms(),
                     invalid = config.invalidScheduleAlarms(),
                     vm = vm,
@@ -251,8 +256,7 @@ private fun LockBanner() {
 @Composable
 private fun AddAlarmFab(count: Int, enabled: Boolean, onAdd: () -> Unit) {
     ExtendedFloatingActionButton(
-        onClick = onAdd,
-        enabled = enabled,
+        onClick = { if (enabled) onAdd() },
         icon = { Icon(Icons.Default.Add, contentDescription = "Добавить") },
         text = { Text("Добавить") },
     )
@@ -280,6 +284,7 @@ private fun EmptyState() {
 private fun StatusCard(
     runtime: TimerStateHolder.Ui,
     canStart: Boolean,
+    locked: Boolean,
     missing: List<AlarmConfig>,
     invalid: List<AlarmConfig>,
     vm: TimerViewModel,
@@ -324,17 +329,25 @@ private fun StatusCard(
                     }
                 }
             }
-            if (!canStart) {
+            // Подсказка — только про конфиг (кнопка заблокирована не из-за идущей сессии),
+            // иначе во время работы висело «Включите хотя бы один канал с файлом» при выбранном звуке.
+            if (!canStart && !locked) {
                 val hint = when {
                     invalid.isNotEmpty() -> "Исправьте расписание: " + invalid.joinToString { it.name } +
-                        " (проверь режим, время/количество)."
+                        " (проверьте режим, время и количество)."
                     missing.isNotEmpty() -> "Для старта укажите файл: " + missing.joinToString { it.name }
-                    else -> "Включите хотя бы один канал с файлом."
+                    else -> "Нет ни одного включённого канала со звуком — включите канал и выберите файл."
                 }
                 Text(
                     text = hint,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
+                )
+            } else if (locked) {
+                Text(
+                    text = "Сессия идёт. Правки и старт — после кнопки «Стоп».",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

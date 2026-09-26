@@ -6,34 +6,41 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.Play
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.timersound.TimerViewModel
@@ -89,7 +96,7 @@ fun AlarmCard(
                 )
                 Switch(
                     checked = alarm.enabled,
-                    onCheckedChange = if (canEdit) { vm.setEnabled(alarm.id, it) } else null,
+                    onCheckedChange = if (canEdit) { { value: Boolean -> vm.setEnabled(alarm.id, value) } } else null,
                 )
                 if (canEdit) {
                     IconButton(onClick = onDelete) {
@@ -123,7 +130,7 @@ fun AlarmCard(
                         modifier = Modifier.size(48.dp),
                     ) {
                         Icon(
-                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.Play,
+                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                             contentDescription = if (isPlaying) "Пауза" else "Воспроизвести",
                         )
                     }
@@ -165,7 +172,7 @@ fun AlarmCard(
                         }
                         append(" · ")
                         alarm.startMinutes?.let { append(TimerSession.formatHms(it * 60_000L)) }
-                            ?: append("Сразу")
+                            ?: append("Через интервал")
                         if (alarm.mode == SceneMode.INTERVAL || alarm.mode == SceneMode.RANDOM) {
                             append(", ${alarm.launchCount}x")
                         }
@@ -209,10 +216,11 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
         OutlinedTextField(
             value = name,
             onValueChange = { name = it.take(Defaults.MAX_NAME_LENGTH) },
-            onEditingFinished = { vm.renameAlarm(alarm.id, name) },
             singleLine = true,
             label = { Text("Имя") },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .onFocusChanged { if (!it.isFocused) vm.renameAlarm(alarm.id, name) },
         )
 
         // Mode chips
@@ -231,18 +239,21 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
             SceneMode.REPEAT -> TimeField(
                 value = alarm.startMinutes,
                 onChange = { vm.setStartMinutes(alarm.id, it) },
-                label = "Начать с (HH:MM), пусто — сразу",
+                label = "Начать с (HH:MM), пусто — через интервал",
+                warning = pastTimeWarning(alarm.startMinutes),
             )
             SceneMode.ONCE_TIME -> TimeField(
                 value = alarm.startMinutes,
                 onChange = { vm.setStartMinutes(alarm.id, it) },
                 label = "Время (HH:MM)",
+                warning = pastTimeWarning(alarm.startMinutes),
             )
             SceneMode.INTERVAL -> {
                 TimeField(
                     value = alarm.startMinutes,
                     onChange = { vm.setStartMinutes(alarm.id, it) },
                     label = "Первый в (HH:MM)",
+                    warning = pastTimeWarning(alarm.startMinutes),
                 )
                 CountField(
                     value = alarm.launchCount,
@@ -260,6 +271,8 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
                     value = alarm.endMinutes,
                     onChange = { vm.setEndMinutes(alarm.id, it) },
                     label = "Окно до (HH:MM, не вкл.)",
+                    // Прошедший конец окна = сегодня окна больше нет, звуки уедут на завтра.
+                    warning = pastTimeWarning(alarm.endMinutes),
                 )
                 CountField(
                     value = alarm.launchCount,
@@ -269,22 +282,13 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
             }
         }
 
-        // Interval + presets (REPEAT and INTERVAL)
+        // Interval (REPEAT and INTERVAL)
         if (alarm.mode == SceneMode.REPEAT || alarm.mode == SceneMode.INTERVAL) {
             DurationField(
                 valueMs = alarm.intervalMs,
                 onChange = { vm.setInterval(alarm.id, it) },
                 label = "Интервал ЧЧ:ММ:СС",
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Presets.forEach { (label, ms) ->
-                    FilterChip(
-                        selected = alarm.intervalMs == ms,
-                        onClick = { vm.setInterval(alarm.id, ms) },
-                        label = { Text(label) },
-                    )
-                }
-            }
         }
 
         // Volume slider
@@ -321,58 +325,98 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
 
 @Composable
 fun DurationField(valueMs: Long, onChange: (Long) -> Unit, label: String) {
-    var text by remember(valueMs) { mutableStateOf(TimerSession.formatHms(valueMs)) }
+    var text by remember { mutableStateOf(TextFieldValue(TimerSession.formatHms(valueMs))) }
+    var focused by remember { mutableStateOf(false) }
+    // Пока поле в фокусе, не перезаписываем ввод значением из модели — иначе посимвольный ввод ломается.
+    LaunchedEffect(valueMs, focused) {
+        if (!focused) {
+            val expected = TimerSession.formatHms(valueMs)
+            if (text.text != expected) text = TextFieldValue(expected, TextRange(expected.length))
+        }
+    }
     OutlinedTextField(
         value = text,
         onValueChange = { raw ->
-            val cleaned = raw.filter { it.isDigit() || it == ':' }.take(8)
-            text = cleaned
-            parseHms(cleaned)?.let(onChange)
+            val formatted = formatHmsInput(restartIfFull(raw.text, text.text, MAX_HMS_DIGITS))
+            // Каретку всегда ставим в конец: иначе после авто-маски Compose переставляет её в середину
+            // и следующие цифры вставляются не туда (0048 → 00:84).
+            text = TextFieldValue(formatted, TextRange(formatted.length))
+            parseHms(formatted)?.let(onChange)
+        },
+        modifier = Modifier.onFocusChanged { state ->
+            val gained = state.isFocused && !focused
+            focused = state.isFocused
+            // Тап по заполненному полю выделяет всё значение: для экранной клавиатуры первая
+            // же цифра заменит его целиком. Если IME проигнорирует выделение, значение
+            // подменит restartIfFull() ниже.
+            if (gained && text.text.isNotEmpty()) {
+                text = TextFieldValue(text.text, TextRange(0, text.text.length))
+            }
         },
         singleLine = true,
-        isError = text.isNotEmpty() && parseHms(text) == null,
+        isError = text.text.isNotEmpty() && parseHms(text.text) == null,
         label = { Text(label) },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        supportingText = { Text("Только цифры, «:» добавятся сами (130 → 1:30). Тап — ввод заменит значение.") },
     )
 }
 
 @Composable
-fun TimeField(value: Int?, onChange: (Int?) -> Unit, label: String) {
-    var text by remember(value) { mutableStateOf(value?.let(::formatMinutes) ?: "") }
-    
-    // Синхронизация при изменении внешнего значения
-    LaunchedEffect(value) {
-        val expected = value?.let(::formatMinutes) ?: ""
-        if (text != expected) {
-            text = expected
+fun TimeField(value: Int?, onChange: (Int?) -> Unit, label: String, warning: String? = null) {
+    var text by remember { mutableStateOf(TextFieldValue(value?.let(::formatMinutes) ?: "")) }
+    var focused by remember { mutableStateOf(false) }
+
+    // Синхронизация с моделью — только когда поле не в фокусе (иначе ввод затирается).
+    LaunchedEffect(value, focused) {
+        if (!focused) {
+            val expected = value?.let(::formatMinutes) ?: ""
+            if (text.text != expected) text = TextFieldValue(expected, TextRange(expected.length))
         }
     }
-    
+
     OutlinedTextField(
         value = text,
         onValueChange = { raw ->
-            // Удаляем всё кроме цифр, ограничиваем 4 символами
-            val digits = raw.filter { it.isDigit() }.take(4)
-            
-            // Форматируем с автоматической вставкой ":" после двух цифр
-            val formatted = if (digits.length > 2) {
-                "${digits.take(2)}:${digits.drop(2)}"
-            } else {
-                digits
-            }
-            
-            text = formatted
+            val formatted = formatHmInput(restartIfFull(raw.text, text.text, MAX_HM_DIGITS))
+            // Каретка всегда в конце — авто-маска иначе переставляет её в середину строки.
+            text = TextFieldValue(formatted, TextRange(formatted.length))
             onChange(parseHm(formatted))
         },
+        modifier = Modifier.onFocusChanged { state ->
+            val gained = state.isFocused && !focused
+            focused = state.isFocused
+            // См. DurationField: заполненное поле выделяется целиком, чтобы ввод его заменял.
+            if (gained && text.text.isNotEmpty()) {
+                text = TextFieldValue(text.text, TextRange(0, text.text.length))
+            }
+        },
         singleLine = true,
-        isError = text.isNotEmpty() && parseHm(text) == null,
+        isError = text.text.isNotEmpty() && parseHm(text.text) == null,
         label = { Text(label) },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         supportingText = {
-            Text("Вводите только цифры, : добавится автоматически (930 → 09:30)")
+            if (warning != null) {
+                Text(warning, color = MaterialTheme.colorScheme.error)
+            } else {
+                Text("Только цифры, «:» добавится сам (930 → 09:30). Тап — ввод заменит значение.")
+            }
         },
     )
 }
+
+/** Минуты от полуночи по локальному времени — для предупреждений «время уже прошло». */
+internal fun nowMinutesOfDay(nowMs: Long = System.currentTimeMillis()): Int {
+    val c = java.util.Calendar.getInstance()
+    c.timeInMillis = nowMs
+    return c.get(java.util.Calendar.HOUR_OF_DAY) * 60 + c.get(java.util.Calendar.MINUTE)
+}
+
+/**
+ * Предупреждение для времени, которое сегодня уже прошло: такое время сработает только завтра,
+ * и без явного текста это выглядит как «нажал Старт — звука нет».
+ */
+internal fun pastTimeWarning(value: Int?, nowMinutes: Int = nowMinutesOfDay()): String? =
+    if (value != null && value <= nowMinutes) "Это время сегодня уже прошло — сработает завтра." else null
 
 @Composable
 fun CountField(value: Int, onChange: (Int) -> Unit, label: String) {
@@ -388,39 +432,81 @@ fun CountField(value: Int, onChange: (Int) -> Unit, label: String) {
 }
 
 internal fun parseHms(text: String): Long? {
-    if (text.length != 8) return null
     val parts = text.split(':')
-    if (parts.size != 3) return null
-    val h = parts[0].toIntOrNull() ?: return null
-    val m = parts[1].toIntOrNull() ?: return null
-    val s = parts[2].toIntOrNull() ?: return null
-    if (m > 59 || s > 59) return null
-    return (h * 3600L + m * 60L + s) * 1000L
+    if (parts.isEmpty() || parts.size > 3) return null
+    if (parts.any { it.isEmpty() || it.length > 2 || it.any { c -> !c.isDigit() } }) return null
+    val nums = parts.map { it.toInt() }
+    // Части читаем справа налево: последняя — секунды, предыдущая — минуты, первая — часы.
+    val seconds = nums.last()
+    val minutes = if (nums.size >= 2) nums[nums.size - 2] else 0
+    val hours = if (nums.size >= 3) nums[0] else 0
+    if (minutes > 59 || seconds > 59) return null
+    return (hours * 3600L + minutes * 60L + seconds) * 1000L
 }
 
 internal fun parseHm(text: String): Int? {
-    if (text.length != 5) return null
     val parts = text.split(':')
-    if (parts.size != 2) return null
-    val h = parts[0].toIntOrNull() ?: return null
-    val m = parts[1].toIntOrNull() ?: return null
-    if (m > 59) return null
-    val total = h * 60 + m
+    if (parts.isEmpty() || parts.size > 2) return null
+    if (parts.any { it.isEmpty() || it.length > 2 || it.any { c -> !c.isDigit() } }) return null
+    val nums = parts.map { it.toInt() }
+    val minutes = nums.last()
+    val hours = if (nums.size >= 2) nums[0] else 0
+    if (minutes > 59) return null
+    val total = hours * 60 + minutes
     return when {
         total <= 24 * 60 - 1 -> total
-        total == 24 * 60 && m == 0 -> total
+        total == 24 * 60 && minutes == 0 -> total
         else -> null
+    }
+}
+
+/** Максимум цифр в масках ввода (HH:MM и ЧЧ:ММ:СС). */
+internal const val MAX_HM_DIGITS = 4
+internal const val MAX_HMS_DIGITS = 6
+
+/**
+ * Пользователь начал печатать в уже заполненном поле, а маска отбрасывает лишние цифры
+ * справа — без этой правки значение «замирает» (00:05:00 + «2» → 00:05:00), и поле
+ * выглядит нередактируемым. Считаем такой ввод новым значением с нуля и берём только
+ * реально добавленные цифры (обычно одну).
+ *
+ * Удаление (Backspace) сюда не попадает: длина цифр не растёт, работает обычная маска.
+ */
+internal fun restartIfFull(newText: String, oldText: String, maxDigits: Int): String {
+    val newDigits = newText.filter { it.isDigit() }
+    val oldDigits = oldText.filter { it.isDigit() }
+    if (oldDigits.length < maxDigits || newDigits.length <= maxDigits) return newText
+    val added = (newDigits.length - oldDigits.length).coerceAtLeast(1)
+    return newDigits.takeLast(added)
+}
+
+/**
+ * Маска ввода HH:MM: «:» вставляется автоматически, лишние символы отбрасываются.
+ * 930 → 9:30, 0930 → 09:30, 9 → 9 (неполный ввод — парсер вернёт null и значение не меняется).
+ */
+internal fun formatHmInput(raw: String): String {
+    val d = raw.filter { it.isDigit() }.take(4)
+    return when (d.length) {
+        0 -> ""
+        1, 2 -> d
+        3 -> "${d.take(1)}:${d.drop(1)}"
+        else -> "${d.take(2)}:${d.drop(2)}"
+    }
+}
+
+/**
+ * Маска ввода HH:MM:SS: «:» вставляется автоматически.
+ * 130 → 1:30, 1300 → 13:00, 000003 → 00:00:03, 130000 → 13:00:00.
+ */
+internal fun formatHmsInput(raw: String): String = when (val d = raw.filter { it.isDigit() }.take(6)) {
+    "" -> ""
+    else -> when (d.length) {
+        1, 2 -> d
+        3, 4 -> "${d.dropLast(2)}:${d.takeLast(2)}"
+        5 -> "${d.take(1)}:${d.substring(1, 3)}:${d.drop(3)}"
+        else -> "${d.take(2)}:${d.substring(2, 4)}:${d.drop(4)}"
     }
 }
 
 internal fun formatMinutes(minutes: Int): String =
     if (minutes == 24 * 60) "24:00" else "%02d:%02d".format(minutes / 60, minutes % 60)
-
-internal val Presets: List<Pair<String, Long>> = listOf(
-    "1 мин" to 60_000L,
-    "3 мин" to 180_000L,
-    "5 мин" to 300_000L,
-    "10 мин" to 600_000L,
-    "15 мин" to 900_000L,
-    "30 мин" to 1_800_000L,
-)

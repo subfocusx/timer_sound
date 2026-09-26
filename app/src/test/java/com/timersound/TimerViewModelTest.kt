@@ -3,13 +3,21 @@ package com.timersound
 import android.app.Application
 import androidx.lifecycle.viewModelScope
 import androidx.test.core.app.ApplicationProvider
+import com.timersound.model.Defaults
+import com.timersound.model.SceneMode
+import com.timersound.service.TimerStateHolder
+import com.timersound.timer.TimerState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -23,6 +31,8 @@ import kotlin.test.assertTrue
  * `testImplementation("org.robolectric:robolectric:...")` для JVM-запуска.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class TimerViewModelTest {
 
     private lateinit var viewModel: TimerViewModel
@@ -35,7 +45,7 @@ class TimerViewModelTest {
 
     @After
     fun tearDown() {
-        kotlinx.coroutines.test.resetMain()
+        Dispatchers.resetMain()
     }
 
     // ------------------------------------------------------------------ add/delete id uniqueness

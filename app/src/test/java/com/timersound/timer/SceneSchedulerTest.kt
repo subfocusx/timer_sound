@@ -51,9 +51,15 @@ class SceneSchedulerTest {
     }
 
     @Test
-    fun initialRepeatFireIsImmediateWithoutStartTime() {
-        // Режим REPEAT без времени начала должен начинать воспроизведение через 500ms после старта
-        assertEquals(7_500L, SceneScheduler.initialRepeatFire(7_000L, 0L, null))
+    fun initialRepeatFireWaitsOneIntervalWithoutStartTime() {
+        // REPEAT без времени начала: первое срабатывание — через один интервал, не в момент старта
+        assertEquals(7_000L + 60_000L, SceneScheduler.initialRepeatFire(7_000L, 0L, null, 60_000L))
+    }
+
+    @Test
+    fun initialRepeatFireWithoutStartTimeFloorsIntervalToOneSecond() {
+        // Защита от нулевого/отрицательного интервала — не играем мгновенно
+        assertEquals(7_000L + 1_000L, SceneScheduler.initialRepeatFire(7_000L, 0L, null, 0L))
     }
 
     @Test
@@ -98,7 +104,7 @@ class SceneSchedulerTest {
             intervalMs = 60_000L,
         )
 
-        assertEquals(nowElapsed + 5 * 60_000L, SceneScheduler.initialRepeatFire(nowElapsed, nowWall, alarm.startMinutes))
+        assertEquals(nowElapsed + 5 * 60_000L, SceneScheduler.initialRepeatFire(nowElapsed, nowWall, alarm.startMinutes, alarm.intervalMs))
         assertTrue(SceneScheduler.fireTimesFor(alarm, nowElapsed, nowWall).isEmpty())
     }
 
@@ -126,6 +132,66 @@ class SceneSchedulerTest {
     }
 
     @Test
+    fun randomWhenNothingLeftTodayFallsBackToTomorrow() {
+        // Окно 10:00–10:01 (одна минута), сейчас 10:00:30 — сегодня слотов не осталось.
+        // До фикса это давало ПУСТОЕ расписание: старт — и полная тишина.
+        val nowElapsed = 0L
+        val nowWall = epochUtc(2026, 9, 21, 10, 0, 30)
+        val alarm = alarm(
+            mode = SceneMode.RANDOM,
+            startMinutes = 600,
+            endMinutes = 601,
+            launchCount = 1,
+        )
+
+        val fires = SceneScheduler.fireTimesFor(alarm, nowElapsed, nowWall)
+        val base = SceneScheduler.localMidnightWall(nowWall) + SceneScheduler.offset(nowElapsed, nowWall)
+
+        assertEquals(1, fires.size)
+        assertEquals(base + 600 * 60_000L + 24 * 60 * 60_000L, fires.first())
+    }
+
+    @Test
+    fun randomWhenWindowFullyPassedSchedulesTomorrow() {
+        val nowElapsed = 0L
+        val nowWall = epochUtc(2026, 9, 21, 12, 0, 0)
+        val alarm = alarm(
+            mode = SceneMode.RANDOM,
+            startMinutes = 600,
+            endMinutes = 630,
+            launchCount = 2,
+        )
+
+        val fires = SceneScheduler.fireTimesFor(alarm, nowElapsed, nowWall)
+        val base = SceneScheduler.localMidnightWall(nowWall) + SceneScheduler.offset(nowElapsed, nowWall)
+        val day = 24 * 60 * 60_000L
+
+        assertEquals(2, fires.size)
+        fires.forEach {
+            assertTrue("слот должен быть завтра: $it", it >= base + day + 600 * 60_000L && it < base + day + 630 * 60_000L)
+        }
+    }
+
+    @Test
+    fun randomInsideWindowUsesOnlyRemainingMinutesToday() {
+        // Окно 10:00–10:10, сейчас 10:05 → допустимы только 10:06..10:09.
+        val nowElapsed = 0L
+        val nowWall = epochUtc(2026, 9, 21, 10, 5, 0)
+        val alarm = alarm(
+            mode = SceneMode.RANDOM,
+            startMinutes = 600,
+            endMinutes = 610,
+            launchCount = 3,
+        )
+
+        val fires = SceneScheduler.fireTimesFor(alarm, nowElapsed, nowWall)
+        val base = SceneScheduler.localMidnightWall(nowWall) + SceneScheduler.offset(nowElapsed, nowWall)
+
+        assertEquals(3, fires.size)
+        fires.forEach { assertTrue("должно быть сегодня и впереди: $it", it > 0L && it < base + 610 * 60_000L) }
+    }
+
+    @Test
     fun randomMinutesAreDistinct() {
         val minutes = SceneScheduler.randomMinutes(30, 5, seed = 42L)
 
@@ -141,11 +207,15 @@ class SceneSchedulerTest {
     }
 
     @Test
-    fun randomMinutesHandlesZeroSpanGracefully() {
-        // При span=0 должен использоваться coerceAtLeast(1) и вернуть одно значение 0
-        val minutes = SceneScheduler.randomMinutes(0, 1, seed = 42L)
-        assertEquals(1, minutes.size)
-        assertEquals(0, minutes[0])
+    fun randomMinutesThrowsOnEmptySpan() {
+        // span=0 — невалидный диапазон: молча вернуть значение нельзя, бросаем исключение
+        // (вызывающий код обязан валидировать окно RANDOM).
+        try {
+            SceneScheduler.randomMinutes(0, 1, seed = 42L)
+            throw AssertionError("ожидалось исключение для пустого диапазона")
+        } catch (expected: IllegalStateException) {
+            // ок
+        }
     }
 
     private fun alarm(
