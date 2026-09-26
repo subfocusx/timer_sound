@@ -10,9 +10,9 @@ enum class SceneMode {
     /** Короткое отображаемое имя для UI. */
     val label: String
         get() = when (this) {
-            REPEAT -> "Повтор"
+            REPEAT -> "Бесконечно, каждые …"
             ONCE_TIME -> "Один раз"
-            INTERVAL -> "N раз"
-            RANDOM -> "Случайно"
+            INTERVAL -> "N раз, каждые …"
+            RANDOM -> "Случайно, N раз в окне"
         }
 }

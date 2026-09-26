@@ -164,12 +164,7 @@ fun AlarmCard(
                         label = { Text(alarm.mode.label) },
                     )
                     val summary = buildString {
-                        when {
-                            alarm.mode == SceneMode.REPEAT -> append("Повтор")
-                            alarm.mode == SceneMode.ONCE_TIME -> append("Один раз")
-                            alarm.mode == SceneMode.INTERVAL -> append("N раз")
-                            alarm.mode == SceneMode.RANDOM -> append("Случайно")
-                        }
+                        append(alarm.mode.label)
                         append(" · ")
                         alarm.startMinutes?.let { append(TimerSession.formatHms(it * 60_000L)) }
                             ?: append("Через интервал")
