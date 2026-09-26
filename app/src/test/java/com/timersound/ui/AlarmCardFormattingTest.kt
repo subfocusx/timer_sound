@@ -2,7 +2,10 @@ package com.timersound.ui
 
 import org.junit.Test
 import kotlin.test.assertEquals
+import com.timersound.model.Defaults
+import com.timersound.model.SceneMode
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * Тесты форматирования и разбора ввода времени в AlarmCard.kt.
@@ -179,5 +182,64 @@ class AlarmCardFormattingTest {
         } finally {
             java.util.TimeZone.setDefault(previous)
         }
+    }
+
+    // ------------------------------------------------------------------ подписи и сводка карточки
+
+    /**
+     * Подписи режимов обязаны быть короткими: четыре чипа должны влезать в строку карточки.
+     * Регресс: подписи вида «Бесконечно, каждые …» не влезали, чипы сжимались до ~100 px,
+     * подпись ломалась в столбик букв и строка режимов вырастала до 1100+ px.
+     */
+    @Test
+    fun sceneModeLabelsAreShortAndComplete() {
+        SceneMode.values().forEach { mode ->
+            assertTrue(mode.label.length <= 9, "подпись режима слишком длинная: ${mode.label}")
+            assertTrue(!mode.label.contains("…"), "подпись режима не должна намекать на продолжение: ${mode.label}")
+        }
+        assertEquals("Повтор", SceneMode.REPEAT.label)
+        assertEquals("Один раз", SceneMode.ONCE_TIME.label)
+        assertEquals("N раз", SceneMode.INTERVAL.label)
+        assertEquals("Случайно", SceneMode.RANDOM.label)
+    }
+
+    /** Сводка свёрнутой карточки не повторяет подпись режима (он и так в соседнем чипе). */
+    @Test
+    fun alarmSummaryDoesNotDuplicateModeLabel() {
+        val alarm = Defaults.newAlarm(0, 0).copy(mode = SceneMode.INTERVAL, intervalMs = 10_000L, launchCount = 3)
+        val summary = alarmSummary(alarm)
+        SceneMode.values().forEach { mode ->
+            assertTrue(!summary.contains(mode.label), "сводка повторяет подпись режима: $summary")
+        }
+        assertEquals("каждые 00:00:10, 3× · 80%", summary)
+    }
+
+    @Test
+    fun alarmSummaryPerMode() {
+        val base = Defaults.newAlarm(0, 0)
+        assertEquals(
+            "каждые 00:05:00 · 80%",
+            alarmSummary(base.copy(mode = SceneMode.REPEAT, intervalMs = 300_000L)),
+        )
+        assertEquals(
+            "с 09:30 · каждые 00:05:00 · 80%",
+            alarmSummary(base.copy(mode = SceneMode.REPEAT, intervalMs = 300_000L, startMinutes = 9 * 60 + 30)),
+        )
+        assertEquals(
+            "в 14:05 · 80%",
+            alarmSummary(base.copy(mode = SceneMode.ONCE_TIME, startMinutes = 14 * 60 + 5)),
+        )
+        assertEquals(
+            "время не задано · 80%",
+            alarmSummary(base.copy(mode = SceneMode.ONCE_TIME, startMinutes = null)),
+        )
+        assertEquals(
+            "09:00–09:30, 3× · 80%",
+            alarmSummary(base.copy(mode = SceneMode.RANDOM, startMinutes = 9 * 60, endMinutes = 9 * 60 + 30, launchCount = 3)),
+        )
+        assertEquals(
+            "окно не задано · 80%",
+            alarmSummary(base.copy(mode = SceneMode.RANDOM, startMinutes = null, endMinutes = null)),
+        )
     }
 }

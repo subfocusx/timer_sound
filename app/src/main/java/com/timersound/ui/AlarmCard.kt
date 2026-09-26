@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -158,6 +161,9 @@ fun AlarmCard(
                 }
 
                 // Summary chips
+                // Сводка: чип режима с цельной подписью + чип сводки на остаток ширины.
+                // Сводка переносится ВНУТРИ чипа (до двух строк) — раньше строка не влезала,
+                // подпись сжималась и превращалась в столбик букв.
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.fillMaxWidth(),
@@ -165,22 +171,14 @@ fun AlarmCard(
                     FilterChip(
                         selected = true,
                         onClick = {},
-                        label = { Text(alarm.mode.label) },
+                        label = { Text(alarm.mode.label, maxLines = 1, softWrap = false) },
                     )
-                    val summary = buildString {
-                        append(alarm.mode.label)
-                        append(" · ")
-                        alarm.startMinutes?.let { append(TimerSession.formatHms(it * 60_000L)) }
-                            ?: append("Через интервал")
-                        if (alarm.mode == SceneMode.INTERVAL || alarm.mode == SceneMode.RANDOM) {
-                            append(", ${alarm.launchCount}x")
-                        }
-                        if (alarm.mode == SceneMode.RANDOM) {
-                            alarm.endMinutes?.let { append(" до ${TimerSession.formatHms(it * 60_000L)}") }
-                        }
-                        append(" · ${alarm.volumePercent}%")
-                    }
-                    FilterChip(selected = true, onClick = {}, label = { Text(summary) })
+                    FilterChip(
+                        selected = true,
+                        onClick = {},
+                        modifier = Modifier.weight(1f),
+                        label = { Text(alarmSummary(alarm), maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                    )
                 }
 
                 // Error line
@@ -210,6 +208,32 @@ fun AlarmCard(
     }
 }
 
+/**
+ * Компактная сводка режима для свёрнутой карточки: только то, чего не видно в чипе режима.
+ * Раньше строка начиналась с повторённого `mode.label` и раздувалась до «N раз, каждые … ·
+ * 09:30:00, 3x до 12:00:00 · 80%» — не влезала и обрезалась.
+ */
+internal fun alarmSummary(alarm: AlarmConfig): String = buildString {
+    when (alarm.mode) {
+        SceneMode.REPEAT, SceneMode.INTERVAL -> {
+            alarm.startMinutes?.let { append("с ${formatMinutes(it)} · ") }
+            append("каждые ${TimerSession.formatHms(alarm.intervalMs)}")
+            if (alarm.mode == SceneMode.INTERVAL && alarm.launchCount > 0) {
+                append(", ${alarm.launchCount}×")
+            }
+        }
+        SceneMode.ONCE_TIME ->
+            alarm.startMinutes?.let { append("в ${formatMinutes(it)}") } ?: append("время не задано")
+        SceneMode.RANDOM -> {
+            val from = alarm.startMinutes?.let(::formatMinutes)
+            val to = alarm.endMinutes?.let(::formatMinutes)
+            if (from != null && to != null) append("$from–$to") else append("окно не задано")
+            if (alarm.launchCount > 0) append(", ${alarm.launchCount}×")
+        }
+    }
+    append(" · ${alarm.volumePercent}%")
+}
+
 // ------------------------------------------------------------------ expanded content
 
 @Composable
@@ -231,13 +255,19 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
                 .onFocusChanged { if (!it.isFocused) vm.renameAlarm(alarm.id, name) },
         )
 
-        // Mode chips
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // Mode chips: прокручиваемая строка — подписи никогда не сжимаются.
+        // Row с горизонтальной прокруткой измеряет детей без ограничения ширины, поэтому
+        // чип всегда своей натуральной ширины (FlowRow этого не гарантирует: гибкую подпись
+        // он ужимает вместо переноса, и она ломается в столбик букв).
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        ) {
             SceneMode.values().forEach { mode ->
                 FilterChip(
                     selected = alarm.mode == mode,
                     onClick = { vm.setMode(alarm.id, mode) },
-                    label = { Text(mode.label) },
+                    label = { Text(mode.label, maxLines = 1, softWrap = false) },
                 )
             }
         }

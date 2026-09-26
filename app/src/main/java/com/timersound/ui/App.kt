@@ -156,7 +156,8 @@ fun App(vm: TimerViewModel = viewModel()) {
     ) { innerPadding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(innerPadding),
-            contentPadding = PaddingValues(16.dp),
+            // bottom = 96 dp: FAB «Добавить» перекрывал нижний ряд чипов раскрытой карточки.
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item(key = "status") {
@@ -613,7 +614,7 @@ private fun HelpDialog(onDismiss: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("📌 Режимы работы:")
-                Text("• Повтор — бесконечное воспроизведение с интервалом", style = MaterialTheme.typography.bodySmall)
+                Text("• Повтор — повторение с интервалом", style = MaterialTheme.typography.bodySmall)
                 Text("• Один раз — звук в заданное время", style = MaterialTheme.typography.bodySmall)
                 Text("• N раз — повторение заданное количество раз", style = MaterialTheme.typography.bodySmall)
                 Text("• Случайно — случайные моменты в заданном окне времени", style = MaterialTheme.typography.bodySmall)
