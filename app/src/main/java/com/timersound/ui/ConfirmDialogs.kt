@@ -5,6 +5,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import com.timersound.model.AlarmConfig
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 
 /** Диалог подтверждения удаления одного будильника (политика delete require_confirmation). */
 @Composable
@@ -18,10 +20,10 @@ fun DeleteAlarmDialog(
         title = { Text("Удалить будильник?") },
         text = { Text("Удалить «${alarm.name}»? Это действие отменить нельзя.") },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text("Удалить") }
+            TextButton(onClick = onConfirm, modifier = Modifier.testTag("confirm_delete_one")) { Text("Удалить") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
+            TextButton(onClick = onDismiss, modifier = Modifier.testTag("dismiss_delete_one")) { Text("Отмена") }
         },
     )
 }
@@ -38,10 +40,10 @@ fun DeleteAllDialog(
         title = { Text("Удалить все будильники?") },
         text = { Text("Удалить все $count будильников? Это действие отменить нельзя.") },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text("Удалить все") }
+            TextButton(onClick = onConfirm, modifier = Modifier.testTag("confirm_delete_all")) { Text("Удалить все") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
+            TextButton(onClick = onDismiss, modifier = Modifier.testTag("dismiss_delete_all")) { Text("Отмена") }
         },
     )
 }

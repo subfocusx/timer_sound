@@ -2,6 +2,12 @@
 # Environment specific
 local.properties
 
+# Локальные артефакты прогонов (скриншоты, дампы UI) — не часть проекта
+.debug/
+
+# Локально распакованная раздача Gradle (164 МБ)
+gradle-9.7.1/
+
 # Gradle
 .gradle/
 build/

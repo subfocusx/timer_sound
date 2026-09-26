@@ -1,12 +1,30 @@
 package com.timersound.timer
 
 import android.os.SystemClock
+import com.timersound.AppLog
 import com.timersound.model.AlarmConfig
 import com.timersound.model.SceneMode
 import com.timersound.model.TimerConfig
 
 /** Состояние машины состояний сессии таймера (I->R->P<->R->STOP/RESET/COMPLETED). */
 enum class TimerState { IDLE, RUNNING, PAUSED, COMPLETED }
+
+/**
+ * А1: политика адаптивного шага тик-цикла. Чистая математика — тестируется без Android:
+ * рядом с событием частый тик для точности, вдали — редкий (точное срабатывание
+ * страхует scheduleExactAlarm в сервисе).
+ */
+object TickPolicy {
+    /** Шаг тика по расстоянию до ближайшего события (null — событий нет). */
+    fun delayMs(untilNextMs: Long?): Long {
+        val untilNext = untilNextMs ?: Long.MAX_VALUE
+        return when {
+            untilNext <= 5_000L -> 250L
+            untilNext <= 30_000L -> 1_000L
+            else -> 5_000L
+        }
+    }
+}
 
 /**
  * Движок сценарной сессии. Единственный источник «что и когда звучит» —
@@ -42,6 +60,9 @@ class TimerSession {
     private var autoStopDeadlineElapsedMs = Long.MAX_VALUE
     private var remainingAutoStopOnPauseMs = Long.MAX_VALUE
     private val scheduled = mutableListOf<Scheduled>()
+    /** Суммарное число trigger() за сессию; лимит — maxTotalFiresPerSession. */
+    private var totalFiresCount = 0
+    private var maxTotalFires = 0
 
     val isRunning: Boolean get() = state == TimerState.RUNNING
     val isActive: Boolean get() = state == TimerState.RUNNING || state == TimerState.PAUSED
@@ -80,7 +101,17 @@ class TimerSession {
         startedWallMs = nowWallMs
         autoStopDeadlineElapsedMs =
             if (config.autoStopMs > 0) nowElapsedMs + config.autoStopMs else Long.MAX_VALUE
-        state = TimerState.RUNNING
+        totalFiresCount = 0
+        maxTotalFires = config.maxTotalFiresPerSession.coerceAtLeast(0)
+        // Б1: весь рассчитанный график одной строкой — отладка RANDOM/INTERVAL без ручного пересчёта.
+        scheduled.forEach { s ->
+            val offsets = buildList {
+                add(s.nextFireElapsedMs - nowElapsedMs)
+                addAll(s.finiteRemaining.map { it - nowElapsedMs })
+            }
+            AppLog.i("TimerSession.start: ch=${s.config.id} mode=${s.config.mode} offsetsMs=$offsets")
+        }
+        transitionTo(TimerState.RUNNING, "start")
     }
 
     /** Пауза: запоминаем остатки до следующих срабатываний и до авто-остановки. */
@@ -94,7 +125,7 @@ class TimerSession {
         remainingAutoStopOnPauseMs =
             if (autoStopDeadlineElapsedMs == Long.MAX_VALUE) Long.MAX_VALUE
             else (autoStopDeadlineElapsedMs - nowElapsedMs).coerceAtLeast(0L)
-        state = TimerState.PAUSED
+        transitionTo(TimerState.PAUSED, "pause")
     }
 
     /** Возобновление: переносим сохранённые остатки от текущего момента. */
@@ -108,7 +139,7 @@ class TimerSession {
         autoStopDeadlineElapsedMs =
             if (remainingAutoStopOnPauseMs == Long.MAX_VALUE) Long.MAX_VALUE
             else nowElapsedMs + remainingAutoStopOnPauseMs
-        state = TimerState.RUNNING
+        transitionTo(TimerState.RUNNING, "resume")
     }
 
     /** Полная остановка (STOP) -> IDLE. */
@@ -117,14 +148,15 @@ class TimerSession {
         scheduled.clear()
         autoStopDeadlineElapsedMs = Long.MAX_VALUE
         remainingAutoStopOnPauseMs = Long.MAX_VALUE
-        state = TimerState.IDLE
+        totalFiresCount = 0
+        transitionTo(TimerState.IDLE, "stop")
     }
 
     /** Принудительно отметить сессию завершённой (авто-остановка). */
     @Synchronized
     fun markCompleted() {
         scheduled.clear()
-        state = TimerState.COMPLETED
+        transitionTo(TimerState.COMPLETED, "markCompleted")
     }
 
     /** Сбросить пометкy «Завершено» -> IDLE. */
@@ -133,7 +165,15 @@ class TimerSession {
         scheduled.clear()
         autoStopDeadlineElapsedMs = Long.MAX_VALUE
         remainingAutoStopOnPauseMs = Long.MAX_VALUE
-        state = TimerState.IDLE
+        totalFiresCount = 0
+        transitionTo(TimerState.IDLE, "reset")
+    }
+
+    /** Б2: переход с логом причины — состояние восстанавливается напрямую, не косвенно. */
+    private fun transitionTo(next: TimerState, reason: String) {
+        val prev = state
+        state = next
+        AppLog.i("TimerSession: $prev -> $next ($reason)")
     }
 
     /**
@@ -157,6 +197,12 @@ class TimerSession {
         scheduled.toList().forEach { s ->
             while (nowElapsedMs >= s.nextFireElapsedMs) {
                 trigger(s.config)
+                totalFiresCount++
+                // Глобальный предохранитель: лимит суммарных срабатываний за сессию.
+                if (maxTotalFires > 0 && totalFiresCount >= maxTotalFires) {
+                    markCompleted()
+                    return true
+                }
                 if (s.finiteRemaining.isNotEmpty()) {
                     s.nextFireElapsedMs = s.finiteRemaining.first()
                     s.finiteRemaining = s.finiteRemaining.drop(1)
@@ -180,6 +226,11 @@ class TimerSession {
     /** Сколько осталось до авто-остановки (null — без ограничения). */
     @Synchronized
     fun countdownToAutoStopMs(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Long? {
+        // В паузе дедлайн тоже заморожен: берём сохранённый остаток, иначе отсчёт падал в 0.
+        if (state == TimerState.PAUSED) {
+            return if (remainingAutoStopOnPauseMs == Long.MAX_VALUE) null
+            else remainingAutoStopOnPauseMs.coerceAtLeast(0L)
+        }
         if (autoStopDeadlineElapsedMs == Long.MAX_VALUE) return null
         return (autoStopDeadlineElapsedMs - nowElapsedMs).coerceAtLeast(0L)
     }
@@ -203,12 +254,19 @@ class TimerSession {
     @Synchronized
     fun nextSoundDescription(nowElapsedMs: Long = SystemClock.elapsedRealtime()): String {
         val s = scheduled.minByOrNull { it.nextFireElapsedMs } ?: return "—"
+        // В паузе абсолютная метка nextFireElapsedMs заморожена и уже в прошлом, а истинный
+        // остаток лежит в remainingOnPauseMs — иначе описание показывало «через 0 с».
+        val remainMs = if (state == TimerState.PAUSED) {
+            s.remainingOnPauseMs.coerceAtLeast(0L)
+        } else {
+            (s.nextFireElapsedMs - nowElapsedMs).coerceAtLeast(0L)
+        }
         val phrase = if (startedWallMs == 0L) {
-            "через ${formatHms((s.nextFireElapsedMs - nowElapsedMs).coerceAtLeast(0L))}"
+            "через ${formatHms(remainMs)}"
         } else {
             // elapsed → wall по шкале сессии (не по реальным часам: они совпадают только вне тестов).
             val nowWallHere = startedWallMs + (nowElapsedMs - startedElapsedMs)
-            describeWallMoment(startedWallMs + (s.nextFireElapsedMs - startedElapsedMs), nowWallHere)
+            describeWallMoment(nowWallHere + remainMs, nowWallHere)
         }
         return "${s.config.name}: $phrase"
     }

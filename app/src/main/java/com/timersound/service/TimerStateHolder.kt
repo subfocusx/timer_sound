@@ -17,6 +17,8 @@ object TimerStateHolder {
         val nextSound: String = "",
         /** Строка «До авто-остановки: …» (пусто — без ограничения). */
         val autoStop: String = "",
+        /** Сколько сигналов заглушено лимитом одновременных звуков за сессию. */
+        val droppedRingsCount: Int = 0,
     )
 
     private val _ui = MutableStateFlow(Ui())

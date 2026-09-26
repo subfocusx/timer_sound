@@ -37,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -62,6 +63,7 @@ fun AlarmCard(
     onToggleExpand: () -> Unit,
     onDelete: () -> Unit,
     onPickFile: () -> Unit,
+    hasOverlap: Boolean = false,
 ) {
     val canEdit by vm.canEdit.collectAsStateWithLifecycle()
     val preview by vm.previewState.collectAsStateWithLifecycle()
@@ -74,7 +76,7 @@ fun AlarmCard(
     val isInvalidSchedule = alarm.enabled && !alarm.scheduleValid
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().testTag("alarm_card_${alarm.id}"),
         shape = RoundedCornerShape(12.dp),
     ) {
         Column(
@@ -92,18 +94,20 @@ fun AlarmCard(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
                         .weight(1f)
+                        .testTag("alarm_name_${alarm.id}")
                         .clickable(onClick = onToggleExpand),
                 )
                 Switch(
                     checked = alarm.enabled,
                     onCheckedChange = if (canEdit) { { value: Boolean -> vm.setEnabled(alarm.id, value) } } else null,
+                    modifier = Modifier.testTag("alarm_switch_${alarm.id}"),
                 )
                 if (canEdit) {
-                    IconButton(onClick = onDelete) {
+                    IconButton(onClick = onDelete, modifier = Modifier.testTag("alarm_delete_${alarm.id}")) {
                         Icon(Icons.Default.Delete, contentDescription = "Удалить")
                     }
                 }
-                IconButton(onClick = onToggleExpand) {
+                IconButton(onClick = onToggleExpand, modifier = Modifier.testTag("alarm_expand_${alarm.id}")) {
                     Icon(
                         imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                         contentDescription = if (isExpanded) "Свернуть" else "Раскрыть",
@@ -127,7 +131,7 @@ fun AlarmCard(
                     )
                     IconButton(
                         onClick = { if (canEdit) vm.playerToggle(alarm.id) },
-                        modifier = Modifier.size(48.dp),
+                        modifier = Modifier.size(48.dp).testTag("alarm_play_${alarm.id}"),
                     ) {
                         Icon(
                             imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -185,6 +189,15 @@ fun AlarmCard(
                         text = "Расписание невалидно — проверьте режим и время/количество",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("alarm_invalid_${alarm.id}"),
+                    )
+                }
+                if (!isInvalidSchedule && hasOverlap) {
+                    Text(
+                        text = "Этот звук может наложиться на другой канал с тем же файлом",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("alarm_overlap_${alarm.id}"),
                     )
                 }
             }
@@ -204,7 +217,7 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
     var name by remember(alarm.name) { mutableStateOf(alarm.name) }
 
     Column(
-        modifier = Modifier.padding(top = 8.dp),
+        modifier = Modifier.padding(top = 8.dp).testTag("alarm_expanded_${alarm.id}"),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         // Name (editable, commit on focus loss)

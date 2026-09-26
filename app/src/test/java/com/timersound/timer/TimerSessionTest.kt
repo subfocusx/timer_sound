@@ -47,7 +47,12 @@ class TimerSessionTest {
     private fun config(
         alarms: List<AlarmConfig>,
         autoStopMs: Long = 0L,
-    ): TimerConfig = TimerConfig(alarms = alarms, autoStopMs = autoStopMs)
+        maxTotalFiresPerSession: Int = 0,
+    ): TimerConfig = TimerConfig(
+        alarms = alarms,
+        autoStopMs = autoStopMs,
+        maxTotalFiresPerSession = maxTotalFiresPerSession,
+    )
 
     // ---------------------------------------------------------------- start / tick
 
@@ -292,6 +297,32 @@ class TimerSessionTest {
         assertTrue("ожидается «Канал 2» в описании: $desc", desc.contains("Канал 2"))
         assertTrue(desc.contains("через"))
     }
+    @Test
+    fun nextSoundDescriptionInPauseShowsRemainingNotZero() {
+        val session = TimerSession()
+        session.start(config(listOf(alarm(0, intervalMs = 10_000L))), 0L)
+        session.pause(4_000L) // до срабатывания оставалось 6 с
+
+        // now заметно позже паузы: абсолютная метка уже в прошлом,
+        // поэтому показывать надо сохранённый остаток, а не «через 0 с».
+        val desc = session.nextSoundDescription(30_000L)
+        assertTrue("ожидается «через 6 с», получено: $desc", desc.contains("через 6 с"))
+
+        session.resume(30_000L)
+        assertEquals("Канал 1: через 6 с", session.nextSoundDescription(30_000L))
+    }
+
+    @Test
+    fun countdownToAutoStopInPauseKeepsRemaining() {
+        val session = TimerSession()
+        session.start(config(listOf(alarm(0, intervalMs = 10_000L)), autoStopMs = 60_000L), 0L)
+        session.pause(20_000L) // до авто-остановки оставалось 40 с
+
+        assertEquals(40_000L, session.countdownToAutoStopMs(50_000L))
+
+        session.resume(50_000L)
+        assertEquals(40_000L, session.countdownToAutoStopMs(50_000L))
+    }
 
     @Test
     fun nextFireForChannel() {
@@ -490,5 +521,63 @@ class TimerSessionTest {
         )
 
         assertEquals("Канал 1: через 30 с", session.nextSoundDescription(nowElapsed))
+    }
+
+    @Test
+    fun maxTotalFiresCompletesBeforeLaunchCountExhausted() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val session = TimerSession()
+        val nowElapsed = 0L
+        val nowWall = epochUtc(2026, 9, 21, 9, 0, 0)
+        session.start(
+            config(
+                listOf(
+                    alarm(
+                        0,
+                        mode = SceneMode.INTERVAL,
+                        startMinutes = 600,
+                        launchCount = 10,
+                        intervalMs = 60_000L,
+                    ),
+                ),
+                maxTotalFiresPerSession = 3,
+            ),
+            nowElapsed,
+            nowWall,
+        )
+        val fired = mutableListOf<Int>()
+        // Каждое срабатывание — на минуту позже; 3-й тик должен завершить сессию.
+        assertFalse(session.tick(nowElapsed + 3_600_000L) { fired += it.id })
+        assertFalse(session.tick(nowElapsed + 3_660_000L) { fired += it.id })
+        assertTrue(session.tick(nowElapsed + 3_720_000L) { fired += it.id })
+        assertEquals(listOf(0, 0, 0), fired)
+        assertEquals(TimerState.COMPLETED, session.state)
+    }
+
+    @Test
+    fun zeroMaxTotalFiresMeansNoLimit() {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+        val session = TimerSession()
+        val nowElapsed = 0L
+        val nowWall = epochUtc(2026, 9, 21, 9, 0, 0)
+        session.start(
+            config(
+                listOf(
+                    alarm(
+                        0,
+                        mode = SceneMode.INTERVAL,
+                        startMinutes = 600,
+                        launchCount = 2,
+                        intervalMs = 60_000L,
+                    ),
+                ),
+            ),
+            nowElapsed,
+            nowWall,
+        )
+        val fired = mutableListOf<Int>()
+        assertFalse(session.tick(nowElapsed + 3_600_000L) { fired += it.id })
+        assertTrue(session.tick(nowElapsed + 3_660_000L) { fired += it.id })
+        assertEquals(listOf(0, 0), fired)
     }
 }

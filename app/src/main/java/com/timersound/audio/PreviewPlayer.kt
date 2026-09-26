@@ -1,7 +1,7 @@
 package com.timersound.audio
 
 import android.content.Context
-import android.util.Log
+import com.timersound.AppLog
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -27,8 +27,6 @@ import kotlinx.coroutines.launch
  * Прогресс обновляется каждые 250 мс через внутренний ticker.
  */
 object PreviewPlayer {
-
-    private const val TAG = "PreviewPlayer"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -81,7 +79,7 @@ object PreviewPlayer {
                 val packageName = context.packageName
                 val rawId = context.resources.getIdentifier("beep", "raw", packageName)
                 if (rawId == 0) {
-                    Log.w(TAG, "Встроенный beep не найден: alarmId=${alarm.id}")
+                    AppLog.w("Встроенный beep не найден: alarmId=${alarm.id}")
                     return
                 }
                 val uriString = "android.resource://$packageName/$rawId"
@@ -89,7 +87,7 @@ object PreviewPlayer {
             }
             uri.isNotEmpty() -> MediaItem.fromUri(uri)
             else -> {
-                Log.w(TAG, "Попытка воспроизвести без файла: alarmId=${alarm.id}")
+                AppLog.w("Попытка воспроизвести без файла: alarmId=${alarm.id}")
                 return
             }
         }
@@ -119,7 +117,7 @@ object PreviewPlayer {
         currentAlarmId = alarm.id
         updateState()
         startTicker()
-        Log.d(TAG, "Запущен превью-плеер для alarmId=${alarm.id}")
+        AppLog.i("Запущен превью-плеер для alarmId=${alarm.id}")
     }
 
     /** Приостановить, если играет. */
@@ -127,7 +125,7 @@ object PreviewPlayer {
         if (player?.isPlaying == true) {
             player?.playWhenReady = false
             updateState()
-            Log.d(TAG, "Пауза превью-плеера")
+            AppLog.i("Пауза превью-плеера")
         }
     }
 
@@ -136,7 +134,7 @@ object PreviewPlayer {
         if (player?.isPlaying != true) {
             player?.playWhenReady = true
             updateState()
-            Log.d(TAG, "Продолжение превью-плеера")
+            AppLog.i("Продолжение превью-плеера")
         }
     }
 
@@ -145,7 +143,7 @@ object PreviewPlayer {
         player?.let {
             it.stop()
             it.release()
-            Log.d(TAG, "Остановлен и освобожден превью-плеер")
+            AppLog.i("Остановлен и освобожден превью-плеер")
         }
         player = null
         currentAlarmId = null

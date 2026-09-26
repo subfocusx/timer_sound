@@ -39,12 +39,16 @@ class TimerViewModelTest {
 
     @Before
     fun setup() {
+        // TimerStateHolder — глобальный синглтон: без сброса состояние RUNNING/PAUSED,
+        // оставленное предыдущим тестом, блокирует все правки и ломает порядок тестов.
+        TimerStateHolder.reset()
         val app = ApplicationProvider.getApplicationContext<Application>()
         viewModel = TimerViewModel(app)
     }
 
     @After
     fun tearDown() {
+        TimerStateHolder.reset()
         Dispatchers.resetMain()
     }
 
@@ -107,11 +111,14 @@ class TimerViewModelTest {
 
     @Test
     fun renameAlarm_trimsAndClamps() = runTest {
-        viewModel.renameAlarm(0, "  Very Long Name Exceeding Limit By Far  ")
-        val config = viewModel.configMode.first()
-        val name = config.alarms[0].name
+        viewModel.renameAlarm(0, "  Имя с пробелами  ")
+        assertEquals("Имя с пробелами", viewModel.configMode.first().alarms[0].name)
+
+        // Обрезка проверяется на имени, которое ПОСЛЕ trim длиннее лимита (60 > 40).
+        viewModel.renameAlarm(0, "  " + "x".repeat(60) + "  ")
+        val name = viewModel.configMode.first().alarms[0].name
         assertEquals(Defaults.MAX_NAME_LENGTH, name.length)
-        assertFalse(name.startsWith("  ")) // trimmed
+        assertEquals("x".repeat(Defaults.MAX_NAME_LENGTH), name)
     }
 
     @Test
@@ -147,12 +154,14 @@ class TimerViewModelTest {
         TimerStateHolder.set(
             TimerStateHolder.Ui(state = TimerState.RUNNING, nextSound = "", autoStop = ""),
         )
-        viewModel.addAlarm()
+        viewModel.addAlarm() // отклонено: правки запрещены при RUNNING
+        assertEquals(1, viewModel.configMode.first().alarms.size)
 
         TimerStateHolder.set(
             TimerStateHolder.Ui(state = TimerState.COMPLETED, nextSound = "", autoStop = ""),
         )
 
+        viewModel.addAlarm() // разрешено: сессия завершена
         viewModel.renameAlarm(1, "Should Succeed")
         val config = viewModel.configMode.first()
         assertEquals("Should Succeed", config.alarms[1].name)

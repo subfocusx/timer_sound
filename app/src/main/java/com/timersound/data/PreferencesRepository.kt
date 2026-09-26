@@ -1,6 +1,7 @@
 package com.timersound.data
 
 import android.content.Context
+import com.timersound.AppLog
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -18,17 +19,28 @@ import com.timersound.model.Defaults
 import com.timersound.model.SceneMode
 import com.timersound.model.TimerConfig
 
-private val Context.dataStore by preferencesDataStore(
+// internal (не private): тесты миграции должны иметь возможность засеять legacy-ключи
+// в тот же DataStore, что читает продакшн-код. Поведение не меняется.
+internal val Context.dataStore by preferencesDataStore(
     name = "timer_sound",
     // Битый файл настроек (обрыв записи, повреждённые байты) не должен ронять приложение
     // при старте: подменяем его пустыми настройками, дальше срабатывает обычный фолбэк на дефолты.
-    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+    corruptionHandler = ReplaceFileCorruptionHandler { e ->
+        AppLog.e("PreferencesRepository: битый файл настроек, откат на пустые: $e")
+        emptyPreferences()
+    },
 )
 
 private val alarmsJsonKey = stringPreferencesKey("alarms_json")
 private val schemaVersionKey = intPreferencesKey("schema_version")
 private val nextAlarmIdKey = intPreferencesKey("next_alarm_id")
 private val autoStopKey = longPreferencesKey("auto_stop_ms")
+private val maxFiresKey = intPreferencesKey("max_total_fires")
+private val fadeInKey = booleanPreferencesKey("fade_in_enabled")
+private val sessionActiveKey = booleanPreferencesKey("session_active")
+
+/** Метка «системный запрос POST_NOTIFICATIONS уже показывали» — чтобы не спрашивать каждый запуск. */
+private val notificationAskedKey = booleanPreferencesKey("notification_permission_asked")
 
 /**
  * Локальное хранилище настроек (DataStore + JSON).
@@ -41,10 +53,14 @@ class PreferencesRepository(private val context: Context) {
         val version = p[schemaVersionKey] ?: 1
         val alarms = if (version >= 2) {
             p[alarmsJsonKey]?.let { jsonStr ->
-                runCatching {
+                val parsed = runCatching {
                     alarmsJson.decodeFromString(AlarmListDto.serializer(), jsonStr)
                         .alarms.map { it.toAlarmConfig() }
                 }.getOrNull()
+                if (parsed == null) {
+                    AppLog.e("PreferencesRepository: битый alarms_json (${jsonStr.length} символов), откат на firstRunConfig")
+                }
+                parsed
             } ?: Defaults.firstRunConfig().alarms
         } else {
             // До миграции: читаем legacy-ключи напрямую.
@@ -53,6 +69,8 @@ class PreferencesRepository(private val context: Context) {
         TimerConfig(
             alarms = alarms,
             autoStopMs = (p[autoStopKey] ?: 0L).coerceAtLeast(0L),
+            maxTotalFiresPerSession = (p[maxFiresKey] ?: 0).coerceAtLeast(0),
+            fadeInEnabled = p[fadeInKey] ?: false,
         )
     }
 
@@ -63,7 +81,33 @@ class PreferencesRepository(private val context: Context) {
                 AlarmListDto(config.alarms.map { it.toDto() }),
             )
             p[autoStopKey] = config.autoStopMs
+            p[maxFiresKey] = config.maxTotalFiresPerSession.coerceAtLeast(0)
+            p[fadeInKey] = config.fadeInEnabled
         }
+    }
+
+    /**
+     * А4: метка «сессия считалась активной». Ставится при старте сессии,
+     * снимается при штатном завершении. Если процесс убит системой, метка
+     * остаётся true — при следующем запуске показываем «прервано системой».
+     */
+    suspend fun setSessionActive(active: Boolean) {
+        context.dataStore.edit { p -> p[sessionActiveKey] = active }
+    }
+
+    suspend fun wasSessionActive(): Boolean =
+        context.dataStore.data.first()[sessionActiveKey] ?: false
+
+    /**
+     * Показывали ли уже системный запрос разрешения на уведомления (API 33+).
+     * Флаг в DataStore: без него диалог всплывал при каждом запуске, пока пользователь
+     * не откажет дважды (дальше платформа глушит его сама, но приложение продолжало просить).
+     */
+    suspend fun wasNotificationPermissionAsked(): Boolean =
+        context.dataStore.data.first()[notificationAskedKey] ?: false
+
+    suspend fun setNotificationPermissionAsked() {
+        context.dataStore.edit { it[notificationAskedKey] = true }
     }
 
     /**

@@ -16,6 +16,16 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
+
+        // Без этого androidTest-тесты (Compose UI / Espresso) не запускаются:
+        // сборка падает с "No instrumentation runner specified".
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    testOptions {
+        // Отключает системные анимации на период инструментальных тестов,
+        // иначе ui-test-junit4 не дожидается idle и тесты флакуют.
+        animationsDisabled = true
     }
 
     buildTypes {
@@ -81,6 +91,8 @@ dependencies {
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.robolectric)
     androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

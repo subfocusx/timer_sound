@@ -65,11 +65,39 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
     /** Состояние превью-плеера (одна активная дорожка). */
     val previewState: StateFlow<PreviewPlayer.State?> = PreviewPlayer.state
 
-    // ------------------------------------------------------------------ init
+    /** А4: true — прошлая сессия была убита системой (метка осталась, сервис не поднят). */
+    private val _wasInterrupted = MutableStateFlow(false)
+    val wasInterrupted: StateFlow<Boolean> = _wasInterrupted.asStateFlow()
+
+    /**
+     * Показывали ли уже системный запрос POST_NOTIFICATIONS.
+     * До чтения из DataStore считаем «показывали» (true) — иначе диалог успел бы всплыть
+     * на первой же композиции ещё до того, как стало известно сохранённое значение.
+     */
+    private val _notificationPermissionAsked = MutableStateFlow(true)
+    val notificationPermissionAsked: StateFlow<Boolean> = _notificationPermissionAsked.asStateFlow()
+
+    /** Отмечает, что системный запрос разрешения на уведомления уже показан (сохраняется). */
+    fun markNotificationPermissionAsked() {
+        _notificationPermissionAsked.value = true
+        viewModelScope.launch { repo.setNotificationPermissionAsked() }
+    }
+
+    fun dismissInterrupted() {
+        viewModelScope.launch {
+            repo.setSessionActive(false)
+            _wasInterrupted.value = false
+        }
+    }
 
     init {
         viewModelScope.launch {
             repo.ensureMigrated()
+            if (repo.wasSessionActive()) {
+                // Метка стоит, а сервис при живом процессе молчит → прошлое убито системой.
+                _wasInterrupted.value = true
+            }
+            _notificationPermissionAsked.value = repo.wasNotificationPermissionAsked()
             repo.config.collect { _configMode.value = it }
         }
     }
@@ -251,6 +279,16 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
     fun setAutoStop(ms: Long) {
         if (editingLocked) { refuseEdit(); return }
         update { it.copy(autoStopMs = ms.coerceAtLeast(0L)) }
+    }
+
+    fun setMaxTotalFires(count: Int) {
+        if (editingLocked) { refuseEdit(); return }
+        update { it.copy(maxTotalFiresPerSession = count.coerceAtLeast(0)) }
+    }
+
+    fun setFadeInEnabled(enabled: Boolean) {
+        if (editingLocked) { refuseEdit(); return }
+        update { it.copy(fadeInEnabled = enabled) }
     }
 
     // ------------------------------------------------------------------ persistence
