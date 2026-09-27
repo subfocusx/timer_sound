@@ -495,7 +495,7 @@ private fun AutoStopCard(autoStopMs: Long, onAutoStopChange: (Long) -> Unit, loc
                 )
             }
             if (limited) {
-                DurationField(valueMs = autoStopMs, onChange = onAutoStopChange, label = "ЧЧ:ММ:СС")
+                DurationField(valueMs = autoStopMs, onChange = onAutoStopChange, label = "Авто-остановка через (ЧЧ:ММ:СС)")
                 if (autoStopMs <= 0L) {
                     // Тумблер включён, но значение не задано (autoStopMs = 0 = без ограничения):
                     // без явной строки интерфейс обещает авто-остановку, которой не будет.

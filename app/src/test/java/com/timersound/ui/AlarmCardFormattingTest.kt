@@ -9,6 +9,9 @@ import kotlin.test.assertTrue
 
 /**
  * Тесты форматирования и разбора ввода времени в AlarmCard.kt.
+ *
+ * Конвенция лейблов: время суток — «... (HH:MM)», длительность — «... (ЧЧ:ММ:СС)».
+ * Снапшот [timeFieldLabelsFollowConvention] держит формулировки единообразными.
  */
 class AlarmCardFormattingTest {
 
@@ -241,5 +244,35 @@ class AlarmCardFormattingTest {
             "окно не задано · 80%",
             alarmSummary(base.copy(mode = SceneMode.RANDOM, startMinutes = null, endMinutes = null)),
         )
+    }
+
+    @Test
+    fun timeFieldLabelsFollowConvention() {
+        // Снапшот конвенции: время суток — «смысл (HH:MM)», длительность — «смысл (ЧЧ:ММ:СС)».
+        // Голый «ЧЧ:ММ:СС» без смысла (как было у AutoStopCard) — регрессия.
+        val source = readSource("main/java/com/timersound/ui/AlarmCard.kt") +
+            readSource("main/java/com/timersound/ui/App.kt")
+        val labels = Regex("""label\s*=\s*"([^"]+)"""").findAll(source).map { it.groupValues[1] }.toList()
+        val timeLabels = labels.filter { "(HH:MM" in it || "(ЧЧ:ММ:СС)" in it }
+        assertTrue(timeLabels.size >= 7, "ожидалось ≥7 лейблов времени, найдено: $timeLabels")
+        timeLabels.forEach { label ->
+            val prefix = label.substringBefore("(").trim()
+            assertTrue(prefix.length >= 3, "лейбл без смысла: \"$label\"")
+        }
+        assertTrue(timeLabels.any { it.startsWith("Авто-остановка через") })
+        assertTrue(timeLabels.any { it.startsWith("Интервал между звуками") })
+    }
+
+    private fun readSource(relative: String): String {
+        // Тест бежит из module workdir (app/): исходники рядом, путь устойчив.
+        val direct = java.io.File(relative)
+        if (direct.isFile) return direct.readText()
+        var dir = java.io.File(".").absoluteFile
+        repeat(6) {
+            val candidate = java.io.File(dir, "app/src/$relative")
+            if (candidate.isFile) return candidate.readText()
+            dir = dir.parentFile ?: return@repeat
+        }
+        throw AssertionError("не найден исходник $relative")
     }
 }

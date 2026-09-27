@@ -325,7 +325,7 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
             DurationField(
                 valueMs = alarm.intervalMs,
                 onChange = { vm.setInterval(alarm.id, it) },
-                label = "Интервал ЧЧ:ММ:СС",
+                label = "Интервал между звуками (ЧЧ:ММ:СС)",
             )
         }
 
@@ -399,6 +399,12 @@ fun DurationField(valueMs: Long, onChange: (Long) -> Unit, label: String) {
     )
 }
 
+/**
+ * Поле времени суток (HH:MM, без секунд): «Начать с», «Время», «Первый в», «Окно от/до».
+ * Секунды не нужны осознанно: планировщики оперируют целыми минутами
+ * (SceneScheduler.MS_PER_MIN, startMinutes/endMinutes в минутах с полуночи),
+ * секундная точность дала бы ложное обещание. Длительности — [DurationField] (ЧЧ:ММ:СС).
+ */
 @Composable
 fun TimeField(value: Int?, onChange: (Int?) -> Unit, label: String, warning: String? = null) {
     var text by remember { mutableStateOf(TextFieldValue(value?.let(::formatMinutes) ?: "")) }
