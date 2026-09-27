@@ -252,10 +252,16 @@ class TimerSoundService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         showCompletedNotification()
         TimerStateHolder.setState(TimerState.COMPLETED)
+        // Баг 6: отложенный teardown сверяет epoch, а не грубый enum. Пока звук
+        // доигрывал, пользователь мог нажать «Запустить заново» — handleStart()
+        // поднял новую сессию (epoch вырос), и снос старой здесь запрещён.
+        val completedEpoch = session.epoch
         scope.launch {
             awaitLastRingFinished()
-            // Пока звук доигрывал, пользователь мог нажать «Стоп» или «Запустить заново»:
-            // тогда teardown уже сделан (или начата новая сессия) — не трогаем.
+            if (session.epoch != completedEpoch) {
+                AppLog.i("TimerSoundService: teardown пропущен, сессия уже новая (epoch $completedEpoch -> ${session.epoch})")
+                return@launch
+            }
             if (session.state == TimerState.COMPLETED) handleStop(completed = true)
         }
     }

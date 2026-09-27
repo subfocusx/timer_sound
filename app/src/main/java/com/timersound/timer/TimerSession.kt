@@ -63,6 +63,12 @@ class TimerSession {
     /** Суммарное число trigger() за сессию; лимит — maxTotalFiresPerSession. */
     private var totalFiresCount = 0
     private var maxTotalFires = 0
+    /**
+     * Поколение сессии: +1 на каждый start(). Отложенный teardown (Баг 6)
+     * сверяет его перед сносом — старая сессия не глушит новую.
+     */
+    var epoch: Long = 0L
+        private set
 
     val isRunning: Boolean get() = state == TimerState.RUNNING
     val isActive: Boolean get() = state == TimerState.RUNNING || state == TimerState.PAUSED
@@ -99,6 +105,7 @@ class TimerSession {
             }
         startedElapsedMs = nowElapsedMs
         startedWallMs = nowWallMs
+        epoch++
         autoStopDeadlineElapsedMs =
             if (config.autoStopMs > 0) nowElapsedMs + config.autoStopMs else Long.MAX_VALUE
         totalFiresCount = 0
