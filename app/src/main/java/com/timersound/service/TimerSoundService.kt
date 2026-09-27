@@ -138,7 +138,13 @@ class TimerSoundService : Service() {
         }
     }
 
-    private fun handleCommand(command: Command) {
+    /**
+     * Гонки START/STOP больше нет: вся цепочка suspend и выполняется строго
+     * последовательно внутри consumeEach — handleStart дожидается чтения
+     * конфига до того, как consumer заберёт STOP. Отдельного fire-and-forget
+     * scope.launch здесь было источником подъёма сессии после остановки.
+     */
+    private suspend fun handleCommand(command: Command) {
         when (command) {
             Command.START -> handleStart()
             Command.PAUSE -> handlePause()
@@ -149,32 +155,30 @@ class TimerSoundService : Service() {
         }
     }
 
-    private fun handleStart() {
-        scope.launch {
-            val config = prefs.config.first()
-            if (config.playableAlarms().isEmpty()) {
-                handleStop(completed = false)
-                return@launch
-            }
-            AudioEngine.releaseAll()
-            PreviewPlayer.stop()
-            fadeInEnabled = config.fadeInEnabled
-            prefs.setSessionActive(true)
-            session.start(config)
-            Log.i(TAG, "handleStart: playableTasks=${config.playableAlarms().size}, nextEvent=${session.nextEventElapsedMs()}")
-            acquireWakeLock()
-            setupMediaSession(playing = true)
-            startAsForeground()
-            // Первый тик — сразу после старта: здесь важен ТОЛЬКО факт завершения
-            // сессии. Срабатывание канала — не повод её останавливать (иначе первый
-            // же звук глушился releaseAll() и сессия уходила в COMPLETED).
-            if (handleTick()) {
-                handleAutoStop(playOutLastRing = true)
-                return@launch
-            }
-            startTickLoop()
-            scheduleExactAlarm()
+    private suspend fun handleStart() {
+        val config = prefs.config.first()
+        if (config.playableAlarms().isEmpty()) {
+            handleStop(completed = false)
+            return
         }
+        AudioEngine.releaseAll()
+        PreviewPlayer.stop()
+        fadeInEnabled = config.fadeInEnabled
+        prefs.setSessionActive(true)
+        session.start(config)
+        Log.i(TAG, "handleStart: playableTasks=${config.playableAlarms().size}, nextEvent=${session.nextEventElapsedMs()}")
+        acquireWakeLock()
+        setupMediaSession(playing = true)
+        startAsForeground()
+        // Первый тик — сразу после старта: здесь важен ТОЛЬКО факт завершения
+        // сессии. Срабатывание канала — не повод её останавливать (иначе первый
+        // же звук глушился releaseAll() и сессия уходила в COMPLETED).
+        if (handleTick()) {
+            handleAutoStop(playOutLastRing = true)
+            return
+        }
+        startTickLoop()
+        scheduleExactAlarm()
     }
 
     private fun handlePause() {
@@ -205,7 +209,7 @@ class TimerSoundService : Service() {
     }
 
     /** STOP / завершение: освобождает аудио, снимает FGS, останавливает сервис. */
-    private fun handleStop(completed: Boolean) {
+    private suspend fun handleStop(completed: Boolean) {
         cancelExactAlarm()
         stopTickLoop()
         AudioEngine.releaseAll()
@@ -213,7 +217,7 @@ class TimerSoundService : Service() {
         releaseWakeLock()
         releaseMediaSession()
         stopForeground(STOP_FOREGROUND_REMOVE)
-        scope.launch { prefs.setSessionActive(false) }
+        prefs.setSessionActive(false)
         if (completed) {
             showCompletedNotification()
             TimerStateHolder.setState(TimerState.COMPLETED)
@@ -235,7 +239,7 @@ class TimerSoundService : Service() {
      * Авто-остановка по таймеру ([playOutLastRing] = false) глушит всё сразу —
      * так задумано: пользователь задал момент остановки.
      */
-    private fun handleAutoStop(playOutLastRing: Boolean = false) {
+    private suspend fun handleAutoStop(playOutLastRing: Boolean = false) {
         stopTickLoop()
         cancelExactAlarm()
         publishUiSnapshot(stateOverride = TimerState.COMPLETED)
@@ -369,7 +373,7 @@ class TimerSoundService : Service() {
         return completed || session.state == TimerState.COMPLETED
     }
 
-    private fun onAlarmTick() {
+    private suspend fun onAlarmTick() {
         if (session.state != TimerState.RUNNING) return
         // Это пробуждение сервиса точным алярмом, а НЕ гарантированное срабатывание канала:
         // о самом срабатывании пишет строка «tick alarmFired=true» из handleTick.
