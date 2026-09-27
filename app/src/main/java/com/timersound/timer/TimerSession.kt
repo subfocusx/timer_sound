@@ -103,13 +103,13 @@ class TimerSession {
             if (config.autoStopMs > 0) nowElapsedMs + config.autoStopMs else Long.MAX_VALUE
         totalFiresCount = 0
         maxTotalFires = config.maxTotalFiresPerSession.coerceAtLeast(0)
-        // Б1: весь рассчитанный график одной строкой — отладка RANDOM/INTERVAL без ручного пересчёта.
+        AppLog.i("TimerSession.start: wall=${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date(nowWallMs))} alarms=${scheduled.size} autoStopMs=${config.autoStopMs} maxFires=$maxTotalFires")
         scheduled.forEach { s ->
             val offsets = buildList {
                 add(s.nextFireElapsedMs - nowElapsedMs)
                 addAll(s.finiteRemaining.map { it - nowElapsedMs })
             }
-            AppLog.i("TimerSession.start: ch=${s.config.id} mode=${s.config.mode} offsetsMs=$offsets")
+            AppLog.i("TimerSession.plan: ch=${s.config.id} name=\"${s.config.name}\" mode=${s.config.mode} intervalMs=${s.config.intervalMs} startMin=${s.config.startMinutes} launches=${s.config.launchCount} offsetsMs=$offsets vol=${s.config.volumePercent}")
         }
         transitionTo(TimerState.RUNNING, "start")
     }
@@ -194,9 +194,23 @@ class TimerSession {
         }
 
         // Срабатывания каналов: каждый канал воспроизводится по своему сценарию.
+        // REPEAT: catch-up ограничен MAX_CATCHUP_FIRES_PER_TICK — задержанный тик
+        // жжёт не более 3 пропусков зараз, остаток «докапывает» следующими тиками
+        // (фаза интервалов сдвигается от факта, а не бьёт залпом + не глушится
+        // лимитом AudioEngine.MAX_CONCURRENT_RINGS). Конечные режимы (INTERVAL/
+        // RANDOM/ONCE) досрабатывают полностью: там каждое срабатывание уникально.
         scheduled.toList().forEach { s ->
+            var fired = 0
             while (nowElapsedMs >= s.nextFireElapsedMs) {
+                if (s.config.mode == SceneMode.REPEAT && fired >= MAX_CATCHUP_FIRES_PER_TICK) {
+                    AppLog.w("TimerSession: tick отстал, ch=${s.config.id}: пропуск сжат до $MAX_CATCHUP_FIRES_PER_TICK, фаза сдвинута к $nowElapsedMs")
+                    s.nextFireElapsedMs = nowElapsedMs + s.config.intervalMs.coerceAtLeast(1_000L)
+                    break
+                }
+                val planned = s.nextFireElapsedMs
+                AppLog.evt(s.config.id, s.config.name, planned, nowElapsedMs, s.config.fileUri.ifEmpty { "beep" })
                 trigger(s.config)
+                fired++
                 totalFiresCount++
                 // Глобальный предохранитель: лимит суммарных срабатываний за сессию.
                 if (maxTotalFires > 0 && totalFiresCount >= maxTotalFires) {
@@ -272,6 +286,9 @@ class TimerSession {
     }
 
     companion object {
+        /** Максимум пропущенных REPEAT-интервалов, досрабатываемых за один tick. */
+        const val MAX_CATCHUP_FIRES_PER_TICK = 3
+
         fun formatHms(ms: Long): String {
             val totalSec = (ms / 1000).coerceAtLeast(0L)
             val h = totalSec / 3600

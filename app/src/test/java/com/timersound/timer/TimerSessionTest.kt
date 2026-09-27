@@ -107,10 +107,11 @@ class TimerSessionTest {
         val now = 0L
         session.start(config(listOf(alarm(0, intervalMs = 5_000L))), now)
 
-        // Пропуск тиков: без немедленного старта за 25 с проходит 5 срабатываний (5, 10, 15, 20, 25).
+        // Пропуск тиков: за 25с прошло бы 5 срабатываний, но catch-up сжат
+        // до MAX_CATCHUP_FIRES_PER_TICK, остаток — следующими тиками.
         val fired = mutableListOf<Int>()
         session.tick(now + 25_000L) { fired += it.id }
-        assertEquals(5, fired.size)
+        assertEquals(TimerSession.MAX_CATCHUP_FIRES_PER_TICK, fired.size)
     }
 
     @Test
@@ -579,5 +580,20 @@ class TimerSessionTest {
         assertFalse(session.tick(nowElapsed + 3_600_000L) { fired += it.id })
         assertTrue(session.tick(nowElapsed + 3_660_000L) { fired += it.id })
         assertEquals(listOf(0, 0), fired)
+    }
+
+    @Test
+    fun delayedTickCapsRepeatCatchUp() {
+        // REPEAT 5с, тик задержан на 100с (= 20 пропусков): один tick жжёт
+        // не более MAX_CATCHUP_FIRES_PER_TICK, а не все 20 залпом.
+        val session = TimerSession()
+        session.start(config(listOf(alarm(0, intervalMs = 5_000L))), 0L)
+        val fired = mutableListOf<Int>()
+        assertFalse(session.tick(100_000L) { fired += it.id })
+        assertEquals(TimerSession.MAX_CATCHUP_FIRES_PER_TICK, fired.size)
+        // Фаза сдвинута от факта: следующий тик через интервал — снова один огонь.
+        fired.clear()
+        assertFalse(session.tick(105_000L) { fired += it.id })
+        assertEquals(listOf(0), fired)
     }
 }
