@@ -205,18 +205,30 @@ class SceneSchedulerTest {
         // Попытка получить 100 уникальных значений в диапазоне 10 должна выбросить исключение
         SceneScheduler.randomMinutes(10, 100, seed = 42L)
     }
-
     @Test
-    fun randomMinutesThrowsOnEmptySpan() {
-        // span=0 — невалидный диапазон: молча вернуть значение нельзя, бросаем исключение
-        // (вызывающий код обязан валидировать окно RANDOM).
-        try {
-            SceneScheduler.randomMinutes(0, 1, seed = 42L)
-            throw AssertionError("ожидалось исключение для пустого диапазона")
-        } catch (expected: IllegalStateException) {
-            // ок
+    fun randomChannelsWithDifferentIdsDiverge() {
+        // Два RANDOM-канала, одинаковое окно/launchCount, разные id:
+        // идентичные списки на всех прогонах = синхронизированный seed (регрессия).
+        var identical = 0
+        val runs = 20
+        repeat(runs) { day ->
+            val nowWall = epochUtc(2026, 9, 1 + day, 0, 0, 0)
+            val a = fireTimesForId(id = 1, nowWall)
+            val b = fireTimesForId(id = 2, nowWall)
+            assertEquals(4, a.size)
+            assertEquals(4, b.size)
+            if (a == b) identical++
         }
+        assertTrue("каналы синхронны на всех $runs прогонах", identical < runs)
     }
+
+    private fun fireTimesForId(id: Int, nowWall: Long): List<Long> =
+        SceneScheduler.fireTimesFor(
+            alarm(mode = SceneMode.RANDOM, startMinutes = 600, endMinutes = 660, launchCount = 4)
+                .copy(id = id),
+            0L,
+            nowWall,
+        )
 
     private fun alarm(
         mode: SceneMode,

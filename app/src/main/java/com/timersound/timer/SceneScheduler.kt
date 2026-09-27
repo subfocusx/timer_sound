@@ -72,14 +72,29 @@ object SceneScheduler {
                 val originWall = if (todayCandidates.isEmpty()) dayStartWall + MS_PER_DAY else dayStartWall
                 val candidates = todayCandidates.ifEmpty { minuteSlots }
                 val count = alarm.launchCount.coerceIn(1, candidates.size)
-                return randomMinuteSlots(candidates, count, seed = originWall).sorted()
+                return randomMinuteSlots(candidates, count, seed = randomSeed(originWall, alarm.id)).sorted()
                     .map { originWall + it.toLong() * MS_PER_MIN + offset(nowElapsedMs, nowWallMs) }
             }
             SceneMode.REPEAT -> return emptyList()
         }
     }
 
-    /** n различных случайных минут из готового пула кандидатов. Детерминированно от seed. */
+    /**
+     * Seed для RANDOM-тасовки: начало суток xor свёртка alarm.id (splitmix64).
+     * Без id все каналы дня делили один seed и тасовались одинаково.
+     */
+    fun randomSeed(originWall: Long, alarmId: Int): Long =
+        originWall xor splitmix64(alarmId.toLong() + GOLDEN_GAMMA)
+
+    internal val GOLDEN_GAMMA = 0x9E3779B97F4A7C15uL.toLong()
+
+    private fun splitmix64(z: Long): Long {
+        var x = z + GOLDEN_GAMMA
+        x = (x xor (x ushr 30)) * 0xBF58476D1CE4E5B9uL.toLong()
+        x = (x xor (x ushr 27)) * 0x94D049BB133111EBuL.toLong()
+        return x xor (x ushr 31)
+    }
+
     fun randomMinuteSlots(candidates: List<Int>, n: Int, seed: Long): List<Int> {
         val random = Random(seed)
         val pool = candidates.toMutableList()
