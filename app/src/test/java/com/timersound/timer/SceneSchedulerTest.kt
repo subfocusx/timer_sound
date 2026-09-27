@@ -230,6 +230,29 @@ class SceneSchedulerTest {
             nowWall,
         )
 
+    @Test
+    fun nextClockElapsedTomorrowSurvivesDstSpringForward() {
+        // Europe/Berlin 30.03.2025: переход на летнее время, сутки = 23 часа.
+        // «Завтра в 10:00» — это реальное календарное завтра, а не +24ч от сегодня.
+        val defaultTz = TimeZone.getDefault()
+        TimeZone.setDefault(TimeZone.getTimeZone("Europe/Berlin"))
+        try {
+            val berlin = TimeZone.getTimeZone("Europe/Berlin")
+            fun epochBerlin(y: Int, m: Int, d: Int, h: Int, min: Int): Long {
+                val c = Calendar.getInstance(berlin)
+                c.clear()
+                c.set(y, m - 1, d, h, min, 0)
+                return c.timeInMillis
+            }
+            val nowWall = epochBerlin(2025, 3, 30, 12, 0) // уже после перевода стрелок
+            val elapsed = SceneScheduler.nextClockElapsed(0L, nowWall, 10 * 60)
+            val wall = elapsed - SceneScheduler.offset(0L, nowWall)
+            assertEquals(epochBerlin(2025, 3, 31, 10, 0), wall)
+        } finally {
+            TimeZone.setDefault(defaultTz)
+        }
+    }
+
     private fun alarm(
         mode: SceneMode,
         startMinutes: Int? = null,

@@ -26,9 +26,17 @@ object SceneScheduler {
 
     /** Ближайшее НАСТУПЛЕНИЕ HH:MM: сегодня, если будущее; иначе завтра. */
     fun nextClockElapsed(nowElapsedMs: Long, nowWallMs: Long, targetMinutes: Int): Long {
-        val today = localMidnightWall(nowWallMs) + targetMinutes.toLong() * MS_PER_MIN
-        val wall = if (today > nowWallMs) today else today + MS_PER_DAY
-        return wall + offset(nowElapsedMs, nowWallMs)
+        // Цель строим полями Calendar, а не «полночь + минуты»: в день DST-перехода
+        // сутки 23/25ч, и арифметика уводила время (00:00 CET + 10ч = 11:00 CEST).
+        // «Завтра» — Calendar.add(DAY_OF_YEAR, 1), а не +24ч, по той же причине.
+        val calendar = Calendar.getInstance()
+        calendar.timeInMillis = nowWallMs
+        calendar.set(Calendar.HOUR_OF_DAY, targetMinutes / 60)
+        calendar.set(Calendar.MINUTE, targetMinutes % 60)
+        calendar.set(Calendar.SECOND, 0)
+        calendar.set(Calendar.MILLISECOND, 0)
+        if (calendar.timeInMillis <= nowWallMs) calendar.add(Calendar.DAY_OF_YEAR, 1)
+        return calendar.timeInMillis + offset(nowElapsedMs, nowWallMs)
     }
 
     /**
