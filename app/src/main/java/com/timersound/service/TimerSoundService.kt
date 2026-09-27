@@ -73,6 +73,7 @@ class TimerSoundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        AppLog.init(filesDir)
         prefs = PreferencesRepository(this)
         createNotificationChannel()
         TimerStateHolder.reset()

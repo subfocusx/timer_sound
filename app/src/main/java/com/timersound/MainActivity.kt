@@ -11,6 +11,7 @@ import com.timersound.ui.TimerSoundTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppLog.init(filesDir)
         // Показывать таймер поверх локскрина и будить экран при звонке
         // (на этом Huawei телефон сам блокируется каждые ~минуту; без этих
         // флагов UI прячется под ключным экраном и «выглядит сброшенным»).
