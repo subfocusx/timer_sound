@@ -40,6 +40,49 @@ object SceneScheduler {
     }
 
     /**
+     * Ближайшее наступление HH:MM с учётом маски дней недели ISO 1..7
+     * (бит 0 = Пн). mask == 0 — как обычное nextClockElapsed (ручной старт).
+     * Возвращает elapsed-момент.
+     */
+    fun nextClockElapsedForWeekdays(
+        nowElapsedMs: Long,
+        nowWallMs: Long,
+        targetMinutes: Int,
+        weekdaysMask: Int,
+    ): Long {
+        if (weekdaysMask == 0) return nextClockElapsed(nowElapsedMs, nowWallMs, targetMinutes)
+        val todayIso = isoDayOfWeek(nowWallMs)
+        for (k in 0 until 8) {
+            val day = (todayIso - 1 + k) % 7 + 1
+            if (weekdaysMask and (1 shl (day - 1)) == 0) continue
+            val candidate = wallOfDayPlusK(nowWallMs, targetMinutes, k)
+            if (candidate > nowWallMs) return candidate + offset(nowElapsedMs, nowWallMs)
+        }
+        // Маска непуста, но день не найден — fallback на обычное правило.
+        return nextClockElapsed(nowElapsedMs, nowWallMs, targetMinutes)
+    }
+
+    /** ISO-день недели (1=Пн … 7=Вс) для wall-времени. */
+    fun isoDayOfWeek(wallMs: Long): Int {
+        val cal = Calendar.getInstance()
+        cal.timeInMillis = wallMs
+        return ((cal.get(Calendar.DAY_OF_WEEK) + 5) % 7) + 1
+    }
+
+    /** Wall-момент «день nowWallMs + k, HH:MM». Полем Calendar (DST-безопасно). */
+    internal fun wallOfDayPlusK(nowWallMs: Long, targetMinutes: Int, plusDays: Int): Long {
+        val cal = Calendar.getInstance()
+        cal.timeInMillis = nowWallMs
+        cal.set(Calendar.HOUR_OF_DAY, targetMinutes / 60)
+        cal.set(Calendar.MINUTE, targetMinutes % 60)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        cal.add(Calendar.DAY_OF_YEAR, plusDays)
+        return cal.timeInMillis
+    }
+
+
+    /**
      * Первое срабатывание REPEAT: через один интервал (если время старта не задано) или в ближайшее HH:MM.
      * Без времени старта звук НЕ играет в момент нажатия «Старт» — первое воспроизведение
      * происходит спустя intervalMs, дальше по тому же шагу.

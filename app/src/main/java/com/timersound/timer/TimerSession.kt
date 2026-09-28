@@ -79,18 +79,27 @@ class TimerSession {
         config: TimerConfig,
         nowElapsedMs: Long = SystemClock.elapsedRealtime(),
         nowWallMs: Long = System.currentTimeMillis(),
+        /**
+         * Якорь планового времени (wall-мс) для запуска по расписанию.
+         * Алярм срабатывает на миллисекунды позже плана, а nextClockElapsed
+         * считает `<= now` как «уже прошло» и уносит запуск на завтра.
+         * Планирование идёт от `planAnchorWallMs - 1мс`, и запуск остаётся сегодня.
+         */
+        planAnchorWallMs: Long? = null,
     ) {
+        val planWall = planAnchorWallMs?.minus(1L) ?: nowWallMs
+        val planElapsed = nowElapsedMs - (nowWallMs - planWall)
         scheduled.clear()
         config.playableAlarms()
             .filter { it.scheduleValid }
             .forEach { ch ->
-                val fires = SceneScheduler.fireTimesFor(ch, nowElapsedMs, nowWallMs)
+                val fires = SceneScheduler.fireTimesFor(ch, planElapsed, planWall)
                 if (ch.mode == SceneMode.REPEAT) {
                     scheduled += Scheduled(
                         config = ch,
                         nextFireElapsedMs = SceneScheduler.initialRepeatFire(
-                            nowElapsedMs,
-                            nowWallMs,
+                            planElapsed,
+                            planWall,
                             ch.startMinutes,
                             ch.intervalMs,
                         ),
@@ -291,6 +300,76 @@ class TimerSession {
         }
         return "${s.config.name}: $phrase"
     }
+
+    /**
+     * Снимок сессии для общего таймера UI. Абсолютные elapsed-цели и состояние;
+     * секундный отсчёт считает UI (тикер на elapsedRealtime), в паузе заморожен.
+     */
+    data class FireSnapshot(
+        val alarmId: Int,
+        val alarmName: String,
+        /** Ближайшее срабатывание (абсолютное в RUNNING, now+остаток в PAUSED). */
+        val nextFireElapsedMs: Long,
+        /** Будущие срабатывания (абсолютные в RUNNING, остатки в PAUSED). */
+        val futureElapsedMs: List<Long> = emptyList(),
+    )
+
+    data class SessionSnapshot(
+        val state: TimerState,
+        val fires: List<FireSnapshot>,
+        /** Время до ближайшего события, мс (null — событий нет). */
+        val untilNextMs: Long?,
+        /**
+         * «До завершения последовательности» = время до последнего запланированного
+         * срабатывания, ограниченное дедлайном автоостановки. Null = «∞»
+         * (бесконечный REPEAT без автоостановки/лимита).
+         */
+        val untilEndMs: Long?,
+        /** Число оставшихся срабатываний (null — бесконечно). */
+        val remainingFires: Int?,
+        val totalFiresCount: Int,
+    )
+
+    @Synchronized
+    fun snapshot(nowElapsedMs: Long = SystemClock.elapsedRealtime()): SessionSnapshot {
+        if (!isActive) {
+            return SessionSnapshot(state, emptyList(), null, 0L, 0, totalFiresCount)
+        }
+        val paused = state == TimerState.PAUSED
+        val fires = scheduled.map { s ->
+            val next = if (paused) nowElapsedMs + s.remainingOnPauseMs else s.nextFireElapsedMs
+            val future = if (paused) s.finiteRemaining.map { nowElapsedMs + it }
+            else s.finiteRemaining
+            FireSnapshot(s.config.id, s.config.name, next, future)
+        }
+        val untilNext = fires.minOfOrNull { (it.nextFireElapsedMs - nowElapsedMs).coerceAtLeast(0L) }
+        val autoRemain: Long? = if (paused) {
+            if (remainingAutoStopOnPauseMs == Long.MAX_VALUE) null else remainingAutoStopOnPauseMs
+        } else {
+            if (autoStopDeadlineElapsedMs == Long.MAX_VALUE) null
+            else (autoStopDeadlineElapsedMs - nowElapsedMs).coerceAtLeast(0L)
+        }
+        val hasInfiniteRepeat = scheduled.any {
+            it.config.mode == SceneMode.REPEAT && it.finiteRemaining.isEmpty()
+        }
+        val lastFireRemain: Long? = if (hasInfiniteRepeat) null else fires.flatMap {
+            listOf(it.nextFireElapsedMs) + it.futureElapsedMs
+        }.maxOrNull()?.let { (it - nowElapsedMs).coerceAtLeast(0L) }
+        val untilEnd: Long? = when {
+            hasInfiniteRepeat && autoRemain == null && maxTotalFires <= 0 -> null
+            hasInfiniteRepeat -> autoRemain
+            else -> listOfNotNull(lastFireRemain, autoRemain).minOrNull() ?: 0L
+        }
+        val remaining: Int? = if (hasInfiniteRepeat && maxTotalFires <= 0) {
+            null
+        } else if (maxTotalFires > 0) {
+            (maxTotalFires - totalFiresCount).coerceAtLeast(0)
+        } else {
+            fires.sumOf { 1 + it.futureElapsedMs.size }
+        }
+        return SessionSnapshot(state, fires, untilNext, untilEnd, remaining, totalFiresCount)
+    }
+
 
     companion object {
         /** Максимум пропущенных REPEAT-интервалов, досрабатываемых за один tick. */
