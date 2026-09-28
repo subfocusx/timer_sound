@@ -68,3 +68,49 @@ internal val alarmsJson = Json {
     prettyPrint = false
     encodeDefaults = true
 }
+
+/** DTO группы будильников (схема v3). */
+@Serializable
+data class GroupDto(
+    val id: Int,
+    val name: String,
+    val alarms: List<AlarmDto> = emptyList(),
+    val enabled: Boolean = true,
+    val weekdays: Int = 0,
+    val autoStopMs: Long = 0L,
+    val maxTotalFires: Int = 0,
+)
+
+/** Обёртка списка групп. */
+@Serializable
+data class GroupsListDto(
+    val groups: List<GroupDto>,
+    val nextGroupId: Int = 0,
+)
+
+internal fun com.timersound.model.AlarmGroup.toGroupDto(): GroupDto = GroupDto(
+    id = id,
+    name = name,
+    alarms = alarms.map { it.toDto() },
+    enabled = enabled,
+    weekdays = weekdays,
+    autoStopMs = autoStopMs,
+    maxTotalFires = maxTotalFiresPerSession,
+)
+
+internal fun GroupDto.toAlarmGroup(): com.timersound.model.AlarmGroup =
+    com.timersound.model.AlarmGroup(
+        id = id,
+        name = name,
+        alarms = alarms.map { it.toAlarmConfig() },
+        enabled = enabled,
+        weekdays = weekdays,
+        autoStopMs = autoStopMs,
+        maxTotalFiresPerSession = maxTotalFires,
+    )
+
+internal val groupsJson = Json {
+    ignoreUnknownKeys = true
+    prettyPrint = false
+    encodeDefaults = true
+}

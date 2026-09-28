@@ -37,7 +37,11 @@ private val nextAlarmIdKey = intPreferencesKey("next_alarm_id")
 private val autoStopKey = longPreferencesKey("auto_stop_ms")
 private val maxFiresKey = intPreferencesKey("max_total_fires")
 private val fadeInKey = booleanPreferencesKey("fade_in_enabled")
+private val groupsJsonKey = stringPreferencesKey("groups_json")
+private val nextGroupIdKey = intPreferencesKey("next_group_id")
 private val sessionActiveKey = booleanPreferencesKey("session_active")
+/** Множество id активных групп (v3, CSV); legacy boolean-флаг выше не трогаем. */
+private val activeGroupsKey = stringPreferencesKey("active_group_ids")
 
 /** Метка «системный запрос POST_NOTIFICATIONS уже показывали» — чтобы не спрашивать каждый запуск. */
 private val notificationAskedKey = booleanPreferencesKey("notification_permission_asked")
@@ -86,6 +90,58 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
+    /** Корневой конфиг групп (схема v3). Битый JSON → лог и дефолт, как раньше. */
+    val appConfig: Flow<com.timersound.model.AppConfig> = context.dataStore.data.map { p ->
+        val decoded = p[groupsJsonKey]?.let { jsonStr ->
+            val dto = runCatching {
+                groupsJson.decodeFromString(GroupsListDto.serializer(), jsonStr)
+            }.getOrNull()
+            if (dto == null) {
+                AppLog.e("PreferencesRepository: битый groups_json (${jsonStr.length} символов), откат на дефолт")
+            }
+            dto
+        }
+        if (decoded != null) {
+            com.timersound.model.AppConfig(
+                groups = decoded.groups.map { it.toAlarmGroup() },
+                nextGroupId = decoded.nextGroupId,
+                fadeInEnabled = p[fadeInKey] ?: false,
+            )
+        } else if ((p[schemaVersionKey] ?: 1) >= 3) {
+            com.timersound.model.AppConfig(
+                groups = listOf(com.timersound.model.AlarmGroup(id = 0, name = "Основная")),
+                nextGroupId = 1,
+                fadeInEnabled = p[fadeInKey] ?: false,
+            )
+        } else {
+            com.timersound.model.AppConfig(emptyList(), 0, p[fadeInKey] ?: false)
+        }
+    }
+
+    suspend fun saveGroups(config: com.timersound.model.AppConfig) {
+        context.dataStore.edit { p ->
+            p[groupsJsonKey] = groupsJson.encodeToString(
+                GroupsListDto.serializer(),
+                GroupsListDto(config.groups.map { it.toGroupDto() }, config.nextGroupId),
+            )
+            p[nextGroupIdKey] = config.nextGroupId
+            p[fadeInKey] = config.fadeInEnabled
+        }
+    }
+
+    /** Активные группы (v3): id сессий, считавшихся активными. */
+    suspend fun setActiveGroups(ids: Set<Int>) {
+        context.dataStore.edit { p ->
+            p[activeGroupsKey] = ids.sorted().joinToString(",")
+            p[sessionActiveKey] = ids.isNotEmpty()
+        }
+    }
+
+    suspend fun activeGroups(): Set<Int> =
+        context.dataStore.data.first()[activeGroupsKey]
+            ?.split(",")?.mapNotNull { it.toIntOrNull() }?.toSet() ?: emptySet()
+
+
     /**
      * А4: метка «сессия считалась активной». Ставится при старте сессии,
      * снимается при штатном завершении. Если процесс убит системой, метка
@@ -120,6 +176,11 @@ class PreferencesRepository(private val context: Context) {
      * - битый/нечитаемый alarms_json → логирование + firstRunConfig()
      */
     suspend fun ensureMigrated() {
+        ensureMigratedV1toV2()
+        ensureMigratedV2toV3()
+    }
+
+    private suspend fun ensureMigratedV1toV2() {
         val current = context.dataStore.data.first()
         if ((current[schemaVersionKey] ?: 1) >= 2) return
 
@@ -150,6 +211,49 @@ class PreferencesRepository(private val context: Context) {
             edit.remove(channelCountKey)
         }
     }
+
+    /**
+     * Идемпотентная миграция v2 → v3 в ОДНОЙ транзакции: alarms_json +
+     * глобальные auto_stop_ms/max_total_fires становятся группой «Основная»
+     * (id 0, enabled, weekdays = 0), старые ключи удаляются.
+     */
+    private suspend fun ensureMigratedV2toV3() {
+        val current = context.dataStore.data.first()
+        if ((current[schemaVersionKey] ?: 1) >= 3) return
+
+        val alarms: List<AlarmConfig> = current[alarmsJsonKey]?.let { jsonStr ->
+            runCatching {
+                alarmsJson.decodeFromString(AlarmListDto.serializer(), jsonStr)
+                    .alarms.map { it.toAlarmConfig() }
+            }.getOrNull()
+        } ?: Defaults.firstRunConfig().alarms
+        val main = com.timersound.model.AlarmGroup(
+            id = 0,
+            name = "Основная",
+            alarms = alarms,
+            enabled = true,
+            weekdays = 0,
+            autoStopMs = (current[autoStopKey] ?: 0L).coerceAtLeast(0L),
+            maxTotalFiresPerSession = (current[maxFiresKey] ?: 0).coerceAtLeast(0),
+        )
+        val nextAlarmId = current[nextAlarmIdKey]
+            ?: (alarms.maxOfOrNull { it.id }?.plus(1) ?: alarms.size)
+
+        context.dataStore.edit { edit ->
+            edit[groupsJsonKey] = groupsJson.encodeToString(
+                GroupsListDto.serializer(),
+                GroupsListDto(listOf(main.toGroupDto()), nextGroupId = 1),
+            )
+            edit[nextGroupIdKey] = 1
+            edit.remove(alarmsJsonKey)
+            edit.remove(autoStopKey)
+            edit.remove(maxFiresKey)
+            edit.remove(nextAlarmIdKey)
+            edit[intPreferencesKey("next_alarm_id_g0")] = nextAlarmId
+            edit[schemaVersionKey] = 3
+        }
+    }
+
 
     // ------------------------------------------------------------------ legacy helpers
 
