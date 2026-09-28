@@ -35,24 +35,33 @@ class DeviceRaceTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         repo = PreferencesRepository(context)
         runBlocking {
-            repo.save(
-                Defaults.firstRunConfig().copy(
-                    alarms = listOf(
-                        Defaults.newAlarm(0, 0).copy(
-                            mode = SceneMode.ONCE_TIME,
-                            startMinutes = 0,
-                            fileUri = "",
+            repo.ensureMigrated()
+            repo.saveGroups(
+                com.timersound.model.AppConfig(
+                    groups = listOf(
+                        com.timersound.model.AlarmGroup(
+                            id = 0,
+                            name = "Основная",
+                            alarms = listOf(
+                                Defaults.newAlarm(0, 0).copy(
+                                    mode = SceneMode.ONCE_TIME,
+                                    startMinutes = 0,
+                                    fileUri = "",
+                                ),
+                            ),
+                            enabled = true,
                         ),
                     ),
+                    nextGroupId = 1,
                 ),
             )
         }
         TimerStateHolder.reset()
     }
 
-    private fun send(action: String) {
+    private fun send(action: String, groupId: Int = 0) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        context.startService(TimerSoundService.commandIntent(context, action))
+        context.startService(TimerSoundService.commandIntent(context, action, groupId))
     }
 
     private fun awaitState(state: TimerState, timeoutMs: Long = 10_000L) = runBlocking {

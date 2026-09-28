@@ -53,6 +53,7 @@ import com.timersound.model.AlarmConfig
 import com.timersound.model.SceneMode
 import com.timersound.model.Defaults
 import com.timersound.timer.TimerSession
+import com.timersound.timer.TimerState
 
 /**
  * Карточка будильника: свёрнутая по умолчанию (плеер + прогресс),
@@ -61,6 +62,7 @@ import com.timersound.timer.TimerSession
 @Composable
 fun AlarmCard(
     alarm: AlarmConfig,
+    groupId: Int,
     isExpanded: Boolean,
     vm: TimerViewModel,
     onToggleExpand: () -> Unit,
@@ -68,12 +70,14 @@ fun AlarmCard(
     onPickFile: () -> Unit,
     hasOverlap: Boolean = false,
 ) {
-    val canEdit by vm.canEdit.collectAsStateWithLifecycle()
+    val groupRuntimes by vm.groupRuntimes.collectAsStateWithLifecycle()
+    val canEdit = (groupRuntimes[groupId]?.state ?: TimerState.IDLE).let {
+        it == TimerState.IDLE || it == TimerState.COMPLETED
+    }
     val preview by vm.previewState.collectAsStateWithLifecycle()
-    val isThisPlaying = preview?.alarmId == alarm.id
+    val isThisPlaying = preview?.alarmId == alarm.id && preview?.groupId == groupId
     val isPlaying = preview?.isPlaying == true && isThisPlaying
     val positionMs = preview?.positionMs ?: 0L
-    val durationMs = preview?.durationMs ?: 0L
 
     val fileName = vm.fileDisplayName(alarm)
     val isInvalidSchedule = alarm.enabled && !alarm.scheduleValid
@@ -102,7 +106,7 @@ fun AlarmCard(
                 )
                 Switch(
                     checked = alarm.enabled,
-                    onCheckedChange = if (canEdit) { { value: Boolean -> vm.setEnabled(alarm.id, value) } } else null,
+                    onCheckedChange = if (canEdit) { { value: Boolean -> vm.setEnabled(groupId, alarm.id, value) } } else null,
                     modifier = Modifier.testTag("alarm_switch_${alarm.id}"),
                 )
                 if (canEdit) {
@@ -133,7 +137,7 @@ fun AlarmCard(
                         modifier = Modifier.weight(1f),
                     )
                     IconButton(
-                        onClick = { if (canEdit) vm.playerToggle(alarm.id) },
+                        onClick = { if (canEdit) vm.playerToggle(groupId, alarm.id) },
                         modifier = Modifier.size(48.dp).testTag("alarm_play_${alarm.id}"),
                     ) {
                         Icon(
@@ -252,7 +256,7 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
             label = { Text("Имя") },
             modifier = Modifier
                 .fillMaxWidth()
-                .onFocusChanged { if (!it.isFocused) vm.renameAlarm(alarm.id, name) },
+                .onFocusChanged { if (!it.isFocused) vm.renameAlarm(groupId, alarm.id, name) },
         )
 
         // Mode chips: прокручиваемая строка — подписи никогда не сжимаются.
@@ -266,7 +270,7 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
             SceneMode.values().forEach { mode ->
                 FilterChip(
                     selected = alarm.mode == mode,
-                    onClick = { vm.setMode(alarm.id, mode) },
+                    onClick = { vm.setMode(groupId, alarm.id, mode) },
                     label = { Text(mode.label, maxLines = 1, softWrap = false) },
                 )
             }
@@ -276,45 +280,45 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
         when (alarm.mode) {
             SceneMode.REPEAT -> TimeField(
                 value = alarm.startMinutes,
-                onChange = { vm.setStartMinutes(alarm.id, it) },
+                onChange = { vm.setStartMinutes(groupId, alarm.id, it) },
                 label = "Начать с (HH:MM), пусто — через интервал",
                 warning = pastTimeWarning(alarm.startMinutes),
             )
             SceneMode.ONCE_TIME -> TimeField(
                 value = alarm.startMinutes,
-                onChange = { vm.setStartMinutes(alarm.id, it) },
+                onChange = { vm.setStartMinutes(groupId, alarm.id, it) },
                 label = "Время (HH:MM)",
                 warning = pastTimeWarning(alarm.startMinutes),
             )
             SceneMode.INTERVAL -> {
                 TimeField(
                     value = alarm.startMinutes,
-                    onChange = { vm.setStartMinutes(alarm.id, it) },
+                    onChange = { vm.setStartMinutes(groupId, alarm.id, it) },
                     label = "Первый в (HH:MM)",
                     warning = pastTimeWarning(alarm.startMinutes),
                 )
                 CountField(
                     value = alarm.launchCount,
-                    onChange = { vm.setLaunchCount(alarm.id, it) },
+                    onChange = { vm.setLaunchCount(groupId, alarm.id, it) },
                     label = "Сколько раз",
                 )
             }
             SceneMode.RANDOM -> {
                 TimeField(
                     value = alarm.startMinutes,
-                    onChange = { vm.setStartMinutes(alarm.id, it) },
+                    onChange = { vm.setStartMinutes(groupId, alarm.id, it) },
                     label = "Окно от (HH:MM)",
                 )
                 TimeField(
                     value = alarm.endMinutes,
-                    onChange = { vm.setEndMinutes(alarm.id, it) },
+                    onChange = { vm.setEndMinutes(groupId, alarm.id, it) },
                     label = "Окно до (HH:MM, не вкл.)",
                     // Прошедший конец окна = сегодня окна больше нет, звуки уедут на завтра.
                     warning = pastTimeWarning(alarm.endMinutes),
                 )
                 CountField(
                     value = alarm.launchCount,
-                    onChange = { vm.setLaunchCount(alarm.id, it) },
+                    onChange = { vm.setLaunchCount(groupId, alarm.id, it) },
                     label = "Сколько звуков",
                 )
             }
@@ -324,7 +328,7 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
         if (alarm.mode == SceneMode.REPEAT || alarm.mode == SceneMode.INTERVAL) {
             DurationField(
                 valueMs = alarm.intervalMs,
-                onChange = { vm.setInterval(alarm.id, it) },
+                onChange = { vm.setInterval(groupId, alarm.id, it) },
                 label = "Интервал между звуками (ЧЧ:ММ:СС)",
             )
         }
@@ -338,7 +342,7 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
             )
             Slider(
                 value = alarm.volumePercent.toFloat(),
-                onValueChange = { vm.setVolume(alarm.id, it.toInt()) },
+                onValueChange = { vm.setVolume(groupId, alarm.id, it.toInt()) },
                 valueRange = 0f..100f,
                 modifier = Modifier.weight(3f),
             )
@@ -351,8 +355,8 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickF
         // File operations
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onPickFile) { Text("Выбрать") }
-            TextButton(onClick = { vm.setBuiltInBeep(alarm.id) }) { Text("Встроенный бип") }
-            TextButton(onClick = { vm.removeFile(alarm.id) }) {
+            TextButton(onClick = { vm.setBuiltInBeep(groupId, alarm.id) }) { Text("Встроенный бип") }
+            TextButton(onClick = { vm.removeFile(groupId, alarm.id) }) {
                 Text(if (alarm.isBuiltInBeep) "Сброс" else "Удалить")
             }
         }

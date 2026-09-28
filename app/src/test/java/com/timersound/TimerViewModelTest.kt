@@ -39,11 +39,14 @@ class TimerViewModelTest {
 
     @Before
     fun setup() {
-        // TimerStateHolder — глобальный синглтон: без сброса состояние RUNNING/PAUSED,
-        // оставленное предыдущим тестом, блокирует все правки и ломает порядок тестов.
         TimerStateHolder.reset()
         val app = ApplicationProvider.getApplicationContext<Application>()
         viewModel = TimerViewModel(app)
+    }
+
+    /** Группы грузятся из DataStore асинхронно в init — ждём перед действиями. */
+    private suspend fun awaitGroups() {
+        viewModel.app.first { it.groups.isNotEmpty() }
     }
 
     @After
@@ -56,6 +59,7 @@ class TimerViewModelTest {
 
     @Test
     fun addAlarm_reservesUniqueMonotonicIds() = runTest {
+        awaitGroups();
         viewModel.addAlarm()
         viewModel.addAlarm()
         viewModel.addAlarm()
@@ -70,6 +74,7 @@ class TimerViewModelTest {
 
     @Test
     fun deleteAlarm_keepsRemainingIds() = runTest {
+        awaitGroups();
         viewModel.addAlarm()
         viewModel.addAlarm()
         viewModel.addAlarm() // ids 0,1,2,3
@@ -85,6 +90,7 @@ class TimerViewModelTest {
 
     @Test
     fun deleteAllAlarms_clearsList() = runTest {
+        awaitGroups();
         viewModel.addAlarm()
         viewModel.addAlarm()
 
@@ -98,6 +104,7 @@ class TimerViewModelTest {
 
     @Test
     fun addAlarmRespectsMaxAlarmsLimit() = runTest {
+        awaitGroups();
         repeat(Defaults.MAX_ALARMS) { viewModel.addAlarm() }
         var config = viewModel.configMode.first()
         assertEquals(Defaults.MAX_ALARMS, config.alarms.size)
@@ -111,6 +118,7 @@ class TimerViewModelTest {
 
     @Test
     fun renameAlarm_trimsAndClamps() = runTest {
+        awaitGroups();
         viewModel.renameAlarm(0, "  Имя с пробелами  ")
         assertEquals("Имя с пробелами", viewModel.configMode.first().alarms[0].name)
 
@@ -123,6 +131,7 @@ class TimerViewModelTest {
 
     @Test
     fun renameAlarm_emptyFallsBackToAutoName() = runTest {
+        awaitGroups();
         viewModel.renameAlarm(0, "   ") // whitespace only
         val config = viewModel.configMode.first()
         assertEquals("Будильник 1", config.alarms[0].name)
@@ -132,8 +141,10 @@ class TimerViewModelTest {
 
     @Test
     fun editsRejectedDuringRunningSession() = runTest {
-        TimerStateHolder.set(
-            TimerStateHolder.Ui(state = TimerState.RUNNING, nextSound = "", autoStop = ""),
+        awaitGroups();
+        val gid = viewModel.app.first().groups.first().id
+        TimerStateHolder.setGroup(
+            TimerStateHolder.GroupRuntime(groupId = gid, state = TimerState.RUNNING),
         )
 
         viewModel.addAlarm()
@@ -151,14 +162,16 @@ class TimerViewModelTest {
 
     @Test
     fun editsAllowedAfterSessionCompleted() = runTest {
-        TimerStateHolder.set(
-            TimerStateHolder.Ui(state = TimerState.RUNNING, nextSound = "", autoStop = ""),
+        awaitGroups();
+        val gid = viewModel.app.first().groups.first().id
+        TimerStateHolder.setGroup(
+            TimerStateHolder.GroupRuntime(groupId = gid, state = TimerState.RUNNING),
         )
         viewModel.addAlarm() // отклонено: правки запрещены при RUNNING
         assertEquals(1, viewModel.configMode.first().alarms.size)
 
-        TimerStateHolder.set(
-            TimerStateHolder.Ui(state = TimerState.COMPLETED, nextSound = "", autoStop = ""),
+        TimerStateHolder.setGroup(
+            TimerStateHolder.GroupRuntime(groupId = gid, state = TimerState.COMPLETED),
         )
 
         viewModel.addAlarm() // разрешено: сессия завершена
@@ -171,12 +184,14 @@ class TimerViewModelTest {
 
     @Test
     fun canEditIsTrueInIdle() = runTest {
+        awaitGroups();
         TimerStateHolder.set(TimerStateHolder.Ui(state = TimerState.IDLE))
         assertTrue(viewModel.canEdit.first())
     }
 
     @Test
     fun canEditIsFalseDuringSession() = runTest {
+        awaitGroups();
         TimerStateHolder.set(TimerStateHolder.Ui(state = TimerState.RUNNING))
         assertFalse(viewModel.canEdit.first())
         TimerStateHolder.set(TimerStateHolder.Ui(state = TimerState.PAUSED))
@@ -185,6 +200,7 @@ class TimerViewModelTest {
 
     @Test
     fun canEditIsTrueAfterCompletion() = runTest {
+        awaitGroups();
         TimerStateHolder.set(TimerStateHolder.Ui(state = TimerState.COMPLETED))
         assertTrue(viewModel.canEdit.first())
     }
@@ -193,6 +209,7 @@ class TimerViewModelTest {
 
     @Test
     fun removeFileMakesUriEmpty() = runTest {
+        awaitGroups();
         viewModel.removeFile(0) // built-in beep → empty per spec (no special id==0 case)
         val config = viewModel.configMode.first()
         assertEquals("", config.alarms[0].fileUri)
