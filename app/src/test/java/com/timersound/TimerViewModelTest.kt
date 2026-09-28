@@ -7,11 +7,15 @@ import com.timersound.model.Defaults
 import com.timersound.model.SceneMode
 import com.timersound.service.TimerStateHolder
 import com.timersound.timer.TimerState
+import com.timersound.data.dataStore
+import androidx.datastore.preferences.core.edit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -40,7 +44,30 @@ class TimerViewModelTest {
     @Before
     fun setup() {
         TimerStateHolder.reset()
+        Dispatchers.setMain(UnconfinedTestDispatcher())
         val app = ApplicationProvider.getApplicationContext<Application>()
+        // Изоляция: DataStore-синглтон общий на процесс — сеем известную группу
+        // с одним алармом до создания VM, иначе тесты видят мусор прошлых тестов.
+        // schema_version=3 обязателен: иначе ensureMigrated() в init затопчет seed
+        // пятью legacy-дефолтами (v1→v2 с пустыми префами).
+        kotlinx.coroutines.runBlocking {
+            val repo = com.timersound.data.PreferencesRepository(app)
+            repo.saveGroups(
+                com.timersound.model.AppConfig(
+                    groups = listOf(
+                        com.timersound.model.AlarmGroup(
+                            id = 0, name = "Основная",
+                            alarms = listOf(Defaults.newAlarm(0, 0)),
+                            enabled = true,
+                        ),
+                    ),
+                    nextGroupId = 1,
+                ),
+            )
+            app.dataStore.edit {
+                it[androidx.datastore.preferences.core.intPreferencesKey("schema_version")] = 3
+            }
+        }
         viewModel = TimerViewModel(app)
     }
 

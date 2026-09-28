@@ -156,18 +156,23 @@ private fun GroupTimerBlock(
     Card(modifier = Modifier.fillMaxWidth().testTag("group_timer_${group.id}")) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Общий таймер", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            // Время срабатывания каждого будильника («сегодня в 14:05»).
             val nowWall = System.currentTimeMillis()
-            group.alarms.filter { it.enabled && it.hasFile && it.scheduleValid }.forEach { alarm ->
-                val label = when {
-                    alarm.startMinutes != null -> TimerSession.describeWallMoment(
-                        nextWallFor(alarm.startMinutes, nowWall), nowWall,
-                    )
-                    else -> "через интервал"
+            if (locked) {
+                // Запущенная группа: таймер ТОЛЬКО из snapshot сессии (GroupMiniTimer).
+                group.alarms.filter { it.enabled && it.hasFile && it.scheduleValid }.forEach { alarm ->
+                    val label = when {
+                        alarm.startMinutes != null -> TimerSession.describeWallMoment(
+                            nextWallFor(alarm.startMinutes, nowWall), nowWall,
+                        )
+                        else -> "через интервал"
+                    }
+                    Text("${alarm.name}: $label", style = MaterialTheme.typography.bodyMedium)
                 }
-                Text("${alarm.name}: $label", style = MaterialTheme.typography.bodyMedium)
+                GroupMiniTimer(runtime)
+            } else {
+                // Незапущенная группа: следующий запуск по дням недели, с датой.
+                IdleSchedulePreview(group = group, nowWall = nowWall)
             }
-            GroupMiniTimer(runtime)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Автоостановка: ${if (group.autoStopMs > 0) TimerSession.formatHms(group.autoStopMs) else "нет"}")
             }
@@ -201,6 +206,51 @@ private fun nextWallFor(startMinutes: Int, nowWall: Long): Long {
     cal.set(java.util.Calendar.MILLISECOND, 0)
     if (cal.timeInMillis <= nowWall) cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
     return cal.timeInMillis
+}
+
+/**
+ * Незапущенная группа: следующий автозапуск по маске дней недели.
+ * COMPLETED/IDLE с расписанием — дата следующего разрешённого дня
+ * («пн 5 окт в 16:06»), без расписания — «только ручной запуск».
+ * Никогда не врёт про «завтра», если завтрашний день не разрешён.
+ */
+@Composable
+private fun IdleSchedulePreview(group: AlarmGroup, nowWall: Long) {
+    if (!group.enabled || group.weekdays == 0) {
+        Text("Только ручной запуск", style = MaterialTheme.typography.bodyMedium)
+        return
+    }
+    val next = com.timersound.timer.WakeScheduler.nextAutoStartWall(group, nowWall)
+    if (next == null) {
+        Text(
+            if (group.scheduleValid()) "Нет upcoming запусков" else "Расписание невалидно: нет времени старта",
+            color = if (group.scheduleValid()) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        return
+    }
+    Text(
+        "Следующий запуск: ${describeDayDate(next, nowWall)}",
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier.testTag("group_next_run_${group.id}"),
+    )
+    Text(
+        "До запуска: ${TimerSession.formatHms(next - nowWall)}",
+        style = MaterialTheme.typography.bodyMedium,
+    )
+}
+
+/** «сегодня в 16:06», «завтра в 16:06», «пн 5 окт в 16:06». */
+private fun describeDayDate(targetWall: Long, nowWall: Long): String {
+    val base = TimerSession.describeWallMoment(targetWall, nowWall)
+    if (base.startsWith("сегодня") || base.startsWith("завтра")) return base
+    val cal = java.util.Calendar.getInstance()
+    cal.timeInMillis = targetWall
+    val dow = arrayOf("", "вс", "пн", "вт", "ср", "чт", "пт", "сб")[cal.get(java.util.Calendar.DAY_OF_WEEK)]
+    val months = arrayOf("янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек")
+    val date = "${cal.get(java.util.Calendar.DAY_OF_MONTH)} ${months[cal.get(java.util.Calendar.MONTH)]}"
+    val time = "%02d:%02d".format(cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE))
+    return "$dow $date в $time"
 }
 
 private fun cycleAutoStop(cur: Long): Long = when (cur) {

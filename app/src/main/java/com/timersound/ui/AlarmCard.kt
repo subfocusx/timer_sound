@@ -78,6 +78,7 @@ fun AlarmCard(
     val isThisPlaying = preview?.alarmId == alarm.id && preview?.groupId == groupId
     val isPlaying = preview?.isPlaying == true && isThisPlaying
     val positionMs = preview?.positionMs ?: 0L
+    val durationMs = preview?.durationMs ?: 0L
 
     val fileName = vm.fileDisplayName(alarm)
     val isInvalidSchedule = alarm.enabled && !alarm.scheduleValid
@@ -206,7 +207,7 @@ fun AlarmCard(
 
             // ---- Expanded view ----
             if (isExpanded && canEdit) {
-                ExpandedAlarmContent(alarm = alarm, vm = vm, onPickFile = onPickFile)
+                ExpandedAlarmContent(alarm = alarm, groupId = groupId, vm = vm, onPickFile = onPickFile)
             }
         }
     }
@@ -241,7 +242,7 @@ internal fun alarmSummary(alarm: AlarmConfig): String = buildString {
 // ------------------------------------------------------------------ expanded content
 
 @Composable
-private fun ExpandedAlarmContent(alarm: AlarmConfig, vm: TimerViewModel, onPickFile: () -> Unit) {
+private fun ExpandedAlarmContent(alarm: AlarmConfig, groupId: Int, vm: TimerViewModel, onPickFile: () -> Unit) {
     var name by remember(alarm.name) { mutableStateOf(alarm.name) }
 
     Column(

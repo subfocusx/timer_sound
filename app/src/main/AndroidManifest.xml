@@ -36,6 +36,13 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
         <receiver
+            android:name=".debug.DebugSeedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.timersound.debug.SEED" />
+            </intent-filter>
+        </receiver>
+        <receiver
             android:name=".service.ScheduleWakeReceiver"
             android:exported="false" />
         <receiver

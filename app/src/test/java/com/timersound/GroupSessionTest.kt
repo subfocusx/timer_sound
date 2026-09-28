@@ -9,8 +9,12 @@ import com.timersound.timer.TimerSession
 import com.timersound.timer.TimerState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
+import com.timersound.data.dataStore
+import androidx.datastore.preferences.core.edit
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -32,7 +36,26 @@ class GroupSessionTest {
     @Before
     fun setup() {
         TimerStateHolder.reset()
+        kotlinx.coroutines.Dispatchers.setMain(UnconfinedTestDispatcher())
         val app = ApplicationProvider.getApplicationContext<Application>()
+        kotlinx.coroutines.runBlocking {
+            val repo = com.timersound.data.PreferencesRepository(app)
+            repo.saveGroups(
+                com.timersound.model.AppConfig(
+                    groups = listOf(
+                        com.timersound.model.AlarmGroup(
+                            id = 0, name = "Основная",
+                            alarms = listOf(Defaults.newAlarm(0, 0)),
+                            enabled = true,
+                        ),
+                    ),
+                    nextGroupId = 1,
+                ),
+            )
+            app.dataStore.edit {
+                it[androidx.datastore.preferences.core.intPreferencesKey("schema_version")] = 3
+            }
+        }
         viewModel = TimerViewModel(app)
     }
 

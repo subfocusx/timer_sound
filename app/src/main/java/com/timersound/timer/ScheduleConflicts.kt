@@ -46,13 +46,11 @@ object ScheduleConflicts {
             for (j in i + 1 until active.size) {
                 val a = active[i]
                 val b = active[j]
-                val commonDays = (1..7).filter { day ->
-                    a.weekdays and (1 shl (day - 1)) != 0 && b.weekdays and (1 shl (day - 1)) != 0
-                }
-                if (commonDays.isEmpty()) continue
+                // День общий, если в нём звучит A (своя маска или хвост из прошлого дня)
+                // И звучит B: спан следующего дня относится к следующему дню недели.
                 val spanA = spanOf(a) ?: continue
                 val spanB = spanOf(b) ?: continue
-                val overlapDays = commonDays.filter { day ->
+                val overlapDays = (1..7).filter { day ->
                     val sa = shiftSpanForDay(spanA, a.weekdays, day)
                     val sb = shiftSpanForDay(spanB, b.weekdays, day)
                     sa != null && sb != null && spansOverlapMinutes(sa, sb)
@@ -60,7 +58,7 @@ object ScheduleConflicts {
                 if (overlapDays.isNotEmpty()) {
                     result += Conflict(Kind.SPAN_OVERLAP, a.id, b.id, overlapDays)
                 }
-                val nearDays = commonDays.filter { day ->
+                val nearDays = (1..7).filter { day ->
                     val fa = firesOnDay(a, day)
                     val fb = firesOnDay(b, day)
                     hasNearPair(fa, fb, nearThresholdMs)

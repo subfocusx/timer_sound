@@ -89,10 +89,16 @@ class PreferencesRepositoryMigrationTest {
 
         repo.ensureMigrated()
 
+        // ensureMigrated доводит до v3: плоский конфиг — группа «Основная».
         val raw = context.dataStore.data.first()
-        assertEquals(2, raw[schemaVersionKey])
-        assertEquals(3, raw[nextAlarmIdKey])
-        assertTrue(raw[alarmsJsonKey]?.isNotEmpty() == true)
+        assertEquals(3, raw[schemaVersionKey])
+        assertEquals(1, raw[intPreferencesKey("next_group_id")])
+        assertTrue(raw[stringPreferencesKey("groups_json")]?.isNotEmpty() == true)
+        // Старые ключи удалены в той же транзакции.
+        assertNull(raw[alarmsJsonKey])
+        val main = repo.appConfig.first().groups.single()
+        assertEquals("Основная", main.name)
+        assertEquals(3, main.alarms.size)
     }
 
     @Test
@@ -116,14 +122,17 @@ class PreferencesRepositoryMigrationTest {
         context.dataStore.edit { it.seedLegacyV1(channels = 3) }
         repo.ensureMigrated()
 
-        // Пользователь изменил конфиг после миграции.
-        val edited = repo.config.first().let { it.copy(alarms = it.alarms.take(1), autoStopMs = 12_345L) }
-        repo.save(edited)
+        // Пользователь изменил конфиг после миграции (v3 API).
+        val edited = repo.appConfig.first().let { app ->
+            val main = app.groups.single()
+            app.copy(groups = listOf(main.copy(alarms = main.alarms.take(1), autoStopMs = 12_345L)))
+        }
+        repo.saveGroups(edited)
 
         repo.ensureMigrated() // повторный вызов не должен ничего перезаписать
 
-        assertEquals(edited, repo.config.first())
-        assertEquals(2, context.dataStore.data.first()[schemaVersionKey])
+        assertEquals(edited, repo.appConfig.first())
+        assertEquals(3, context.dataStore.data.first()[schemaVersionKey])
     }
 
     @Test
@@ -132,13 +141,15 @@ class PreferencesRepositoryMigrationTest {
 
         repo.ensureMigrated()
 
+        // Пустые префы → v1→v2 (5 legacy-дефолтов) → v2→v3 (группа «Основная»).
         val config = repo.config.first()
         assertEquals(5, config.alarms.size)
         assertEquals(listOf(0, 1, 2, 3, 4), config.alarms.map { it.id })
         assertEquals(Defaults.BUILT_IN_BEEP, config.alarms[0].fileUri)
         assertTrue(config.alarms[0].enabled)
         assertTrue(config.alarms.drop(1).all { it.fileUri.isEmpty() && !it.enabled })
-        assertEquals(5, context.dataStore.data.first()[nextAlarmIdKey])
+        assertEquals("Основная", repo.appConfig.first().groups.single().name)
+        assertEquals(3, context.dataStore.data.first()[schemaVersionKey])
     }
 
     @Test

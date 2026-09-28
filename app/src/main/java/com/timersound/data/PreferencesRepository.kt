@@ -55,27 +55,37 @@ class PreferencesRepository(private val context: Context) {
 
     val config: Flow<TimerConfig> = context.dataStore.data.map { p ->
         val version = p[schemaVersionKey] ?: 1
-        val alarms = if (version >= 2) {
-            p[alarmsJsonKey]?.let { jsonStr ->
-                val parsed = runCatching {
-                    alarmsJson.decodeFromString(AlarmListDto.serializer(), jsonStr)
-                        .alarms.map { it.toAlarmConfig() }
+        if (version >= 3) {
+            // v3: плоский конфиг — первая группа («Основная») + глобальный fadeIn.
+            val main = p[groupsJsonKey]?.let { jsonStr ->
+                runCatching {
+                    groupsJson.decodeFromString(GroupsListDto.serializer(), jsonStr)
                 }.getOrNull()
-                if (parsed == null) {
-                    AppLog.e("PreferencesRepository: битый alarms_json (${jsonStr.length} символов), откат на firstRunConfig")
-                }
-                parsed
-            } ?: Defaults.firstRunConfig().alarms
+            }?.groups?.firstOrNull()?.toAlarmGroup()
+            main?.toRunConfig(p[fadeInKey] ?: false) ?: Defaults.firstRunConfig()
         } else {
-            // До миграции: читаем legacy-ключи напрямую.
-            (0 until (p[channelCountKey] ?: 5)).map { id -> readLegacyAlarm(p, id) }
+            val alarms = if (version >= 2) {
+                p[alarmsJsonKey]?.let { jsonStr ->
+                    val parsed = runCatching {
+                        alarmsJson.decodeFromString(AlarmListDto.serializer(), jsonStr)
+                            .alarms.map { it.toAlarmConfig() }
+                    }.getOrNull()
+                    if (parsed == null) {
+                        AppLog.e("PreferencesRepository: битый alarms_json (${jsonStr.length} символов), откат на firstRunConfig")
+                    }
+                    parsed
+                } ?: Defaults.firstRunConfig().alarms
+            } else {
+                // До миграции: читаем legacy-ключи напрямую.
+                (0 until (p[channelCountKey] ?: 5)).map { id -> readLegacyAlarm(p, id) }
+            }
+            TimerConfig(
+                alarms = alarms,
+                autoStopMs = (p[autoStopKey] ?: 0L).coerceAtLeast(0L),
+                maxTotalFiresPerSession = (p[maxFiresKey] ?: 0).coerceAtLeast(0),
+                fadeInEnabled = p[fadeInKey] ?: false,
+            )
         }
-        TimerConfig(
-            alarms = alarms,
-            autoStopMs = (p[autoStopKey] ?: 0L).coerceAtLeast(0L),
-            maxTotalFiresPerSession = (p[maxFiresKey] ?: 0).coerceAtLeast(0),
-            fadeInEnabled = p[fadeInKey] ?: false,
-        )
     }
 
     suspend fun save(config: TimerConfig) {
@@ -119,6 +129,7 @@ class PreferencesRepository(private val context: Context) {
     }
 
     suspend fun saveGroups(config: com.timersound.model.AppConfig) {
+        AppLog.i("PreferencesRepository.saveGroups: ids=${config.groups.map { it.id }} next=${config.nextGroupId}")
         context.dataStore.edit { p ->
             p[groupsJsonKey] = groupsJson.encodeToString(
                 GroupsListDto.serializer(),

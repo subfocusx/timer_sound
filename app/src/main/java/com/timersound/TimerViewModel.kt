@@ -427,43 +427,50 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setMode(groupId: Int, id: Int, mode: SceneMode) = editAlarm(groupId, id) { it.copy(mode = mode) }
-    fun setMode(id: Int, mode: SceneMode) = setMode(
-        _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return, id, mode,
-    )
+    fun setMode(id: Int, mode: SceneMode) {
+        val gid = _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return
+        setMode(gid, id, mode)
+    }
 
     fun setStartMinutes(groupId: Int, id: Int, minutes: Int?) = editAlarm(groupId, id) { it.copy(startMinutes = minutes) }
-    fun setStartMinutes(id: Int, minutes: Int?) = setStartMinutes(
-        _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return, id, minutes,
-    )
+    fun setStartMinutes(id: Int, minutes: Int?) {
+        val gid = _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return
+        setStartMinutes(gid, id, minutes)
+    }
 
     fun setEndMinutes(groupId: Int, id: Int, minutes: Int?) = editAlarm(groupId, id) { it.copy(endMinutes = minutes) }
-    fun setEndMinutes(id: Int, minutes: Int?) = setEndMinutes(
-        _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return, id, minutes,
-    )
+    fun setEndMinutes(id: Int, minutes: Int?) {
+        val gid = _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return
+        setEndMinutes(gid, id, minutes)
+    }
 
     fun setLaunchCount(groupId: Int, id: Int, count: Int) = editAlarm(groupId, id) { it.copy(launchCount = count) }
-    fun setLaunchCount(id: Int, count: Int) = setLaunchCount(
-        _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return, id, count,
-    )
+    fun setLaunchCount(id: Int, count: Int) {
+        val gid = _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return
+        setLaunchCount(gid, id, count)
+    }
 
     fun setInterval(groupId: Int, id: Int, ms: Long) =
         editAlarm(groupId, id) { it.copy(intervalMs = ms.coerceAtLeast(Defaults.MIN_INTERVAL_MS)) }
 
-    fun setInterval(id: Int, ms: Long) = setInterval(
-        _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return, id, ms,
-    )
+    fun setInterval(id: Int, ms: Long) {
+        val gid = _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return
+        setInterval(gid, id, ms)
+    }
 
     fun setVolume(groupId: Int, id: Int, percent: Int) =
         editAlarm(groupId, id) { it.copy(volumePercent = percent.coerceIn(0, 100)) }
 
-    fun setVolume(id: Int, percent: Int) = setVolume(
-        _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return, id, percent,
-    )
+    fun setVolume(id: Int, percent: Int) {
+        val gid = _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return
+        setVolume(gid, id, percent)
+    }
 
     fun setEnabled(groupId: Int, id: Int, enabled: Boolean) = editAlarm(groupId, id) { it.copy(enabled = enabled) }
-    fun setEnabled(id: Int, enabled: Boolean) = setEnabled(
-        _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return, id, enabled,
-    )
+    fun setEnabled(id: Int, enabled: Boolean) {
+        val gid = _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return
+        setEnabled(gid, id, enabled)
+    }
 
     /** Legacy: автостоп первой выбранной группы. */
     fun setAutoStop(ms: Long) {
@@ -489,8 +496,9 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         saveJob = viewModelScope.launch {
             delay(300)
             repo.saveGroups(next)
-            // После любого изменения групп/расписаний — rearm.
-            runCatching { WakeSchedulerRearm.rearm(getApplication()) }
+            // После любого изменения групп/расписаний — rearm по уже сохранённому
+            // конфигу (без второго чтения DataStore и без гонки с очередью).
+            runCatching { WakeSchedulerRearm.rearmWith(getApplication(), next) }
         }
     }
 

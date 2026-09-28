@@ -29,7 +29,11 @@ class ScheduleWakeReceiver : BroadcastReceiver() {
         runCatching { ContextCompat.startForegroundService(context, svc) }
         // Перевооружаемся на следующее событие; goAsync держит ресивер до конца IO-работы.
         val pending = goAsync()
-        runCatching { WakeSchedulerRearm.rearm(context) }.also { pending.finish() }
+        try {
+            runCatching { WakeSchedulerRearm.rearm(context) }
+        } finally {
+            pending.finish()
+        }
     }
 }
 
@@ -40,15 +44,18 @@ class ScheduleWakeReceiver : BroadcastReceiver() {
 class ScheduleBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         when (intent?.action) {
-            Intent.ACTION_BOOT_COMPLETED,
-            Intent.ACTION_TIME_SET,
+            Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED,
             Intent.ACTION_MY_PACKAGE_REPLACED,
             Intent.ACTION_LOCALE_CHANGED,
             -> {
                 AppLog.i("ScheduleBootReceiver: ${intent.action}, rearm")
                 val pending = goAsync()
-                runCatching { WakeSchedulerRearm.rearm(context) }.also { pending.finish() }
+                try {
+                    runCatching { WakeSchedulerRearm.rearm(context) }
+                } finally {
+                    pending.finish()
+                }
             }
         }
     }

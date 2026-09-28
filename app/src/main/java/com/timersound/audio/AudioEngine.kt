@@ -46,6 +46,7 @@ object AudioEngine {
     private val players = LinkedHashMap<RingKey, Ringtone>()
     private val previewPlayers = mutableMapOf<RingKey, Ringtone>()
     private val lock = Any()
+    private val fadeScope = CoroutineScope(Dispatchers.Default)
     /**
      * Сколько раз за сессию сработал лимит одновременных звуков (старые глушились).
      * Сбрасывается в [releaseAll]. Читается сервисом для видимого предупреждения.

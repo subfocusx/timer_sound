@@ -181,7 +181,7 @@ class TimerSoundService : Service() {
         }
         startTickLoop()
         scheduleExactAlarm()
-        WakeSchedulerRearm.rearm(this)
+        rearmAsync()
     }
 
     /** Автозапуск по расписанию: пропуск, если группа уже RUNNING/PAUSED. */
@@ -195,22 +195,22 @@ class TimerSoundService : Service() {
         handleStart(groupId, planAnchorWallMs = intent)
     }
 
-    private fun handlePause(groupId: Int) {
+    private suspend fun handlePause(groupId: Int) {
         sessions[groupId]?.pause()
         releaseWakeLockIfIdle()
         updateMediaSession(playing = sessions.values.any { it.isRunning })
         refreshNotification()
         publishGroup(groupId)
-        WakeSchedulerRearm.rearm(this)
+        rearmAsync()
     }
 
-    private fun handleResume(groupId: Int) {
+    private suspend fun handleResume(groupId: Int) {
         sessions[groupId]?.resume()
         acquireWakeLock()
         updateMediaSession(playing = true)
         publishGroup(groupId)
         scheduleExactAlarm()
-        WakeSchedulerRearm.rearm(this)
+        rearmAsync()
     }
 
     /** Restart = атомарно Stop + Start в очереди команд, с новым epoch. */
@@ -219,7 +219,7 @@ class TimerSoundService : Service() {
         handleStart(groupId)
     }
 
-    private fun handleReset(groupId: Int) {
+    private suspend fun handleReset(groupId: Int) {
         sessions[groupId]?.reset()
         TimerStateHolder.removeGroup(groupId)
         sessions.remove(groupId)
@@ -263,7 +263,7 @@ class TimerSoundService : Service() {
         if (sessions.values.any { it.isActive }) {
             scheduleExactAlarm()
             refreshNotification()
-            WakeSchedulerRearm.rearm(this)
+            rearmAsync()
             return
         }
         stopTickLoop()
@@ -393,7 +393,7 @@ class TimerSoundService : Service() {
             handleTickGroup(gid)
             if (session.state == TimerState.COMPLETED) handleAutoStop(gid, playOutLastRing = true)
         }
-        if (anyRunning) scheduleExactAlarm() else WakeSchedulerRearm.rearm(this)
+        if (anyRunning) scheduleExactAlarm() else rearmAsync()
     }
 
 
@@ -424,6 +424,35 @@ class TimerSoundService : Service() {
             usingExactAlarm = false
             Log.w(TAG, "exact alarm scheduling failed: ${error.message}")
         }
+    }
+
+    private fun exactAlarmPendingIntent(): PendingIntent =
+        PendingIntent.getService(
+            this,
+            ALARM_TICK_REQUEST_CODE,
+            commandIntent(this, ACTION_TICK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+    private fun cancelExactAlarm() {
+        if (!usingExactAlarm) return
+        alarmManager?.cancel(exactAlarmPendingIntent())
+        usingExactAlarm = false
+        Log.i(TAG, "exactAlarmCancelled=true")
+    }
+
+    private fun canScheduleExactAlarm(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        return alarmManager?.canScheduleExactAlarms() == true
+    }
+
+    /** Перевооружение по свежему конфигу: без гонки с очередью команд. */
+    private suspend fun rearmAsync() {
+        rearmAsync(prefs.appConfig.first())
+    }
+
+    private fun rearmAsync(app: com.timersound.model.AppConfig) {
+        WakeSchedulerRearm.rearmWith(this, app)
     }
 
     private fun publishGroup(groupId: Int, stateOverride: TimerState? = null) {
@@ -458,6 +487,27 @@ class TimerSoundService : Service() {
         getSystemService(NotificationManager::class.java).notify(COMPLETED_NOTIFICATION_ID, n)
     }
 
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Работа таймера",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "Состояние интервального таймера"
+            setShowBadge(false)
+        }
+        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    private fun startAsForeground() {
+        val notif = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(NOTIFICATION_ID, notif)
+        }
+    }
+
     /** А3: устройство критически греется — предлагаем приостановить всё. */
     private fun showThermalNotification() {
         val text = "Устройство перегревается — рассмотрите паузу таймера."
@@ -473,7 +523,6 @@ class TimerSoundService : Service() {
             .build()
         getSystemService(NotificationManager::class.java).notify(THERMAL_NOTIFICATION_ID, n)
     }
-
     /** Агрегат: «N групп активно; ближайшее: …». */
     private fun buildNotification(): Notification {
         val now = SystemClock.elapsedRealtime()

@@ -66,6 +66,44 @@ class GroupLogicTest {
         assertTrue(pNext > 20 * 3_600_000L, "plain untilNext=$pNext")
     }
 
+    /** Задержка wake-алярма 50–500 мс с якорем-планом: запуск остаётся сегодня. */
+    @Test
+    fun planAnchor_wakeDelaysUpTo500ms() {
+        val planWall = wall(2026, 9, 28, 16, 6)
+        val cfg = TimerConfig(listOf(alarm(0, startMin = 16 * 60 + 6)), autoStopMs = 0L)
+        for (delayMs in listOf(50L, 150L, 300L, 500L)) {
+            val s = TimerSession()
+            s.start(cfg, 1_000L, planWall + delayMs, planAnchorWallMs = planWall)
+            val untilNext = s.snapshot(1_000L).untilNextMs
+            assertNotNull(untilNext, "delay=$delayMs")
+            assertTrue(untilNext < 60_000L, "delay=$delayMs untilNext=$untilNext")
+        }
+    }
+
+    /** Якорь — плановое время, а не момент пробуждения: nextAutoStart wall. */
+    @Test
+    fun wakeAnchor_isPlanTime() {
+        val g = group(0, 0b000_0001, alarm(0, startMin = 16 * 60 + 6))
+        val before = wall(2026, 9, 28, 16, 5) // Пн 16:05
+        val anchor = WakeScheduler.nextAutoStartWall(g, before)
+        assertNotNull(anchor)
+        assertEquals(wall(2026, 9, 28, 16, 6), anchor)
+        val s = TimerSession()
+        s.start(TimerConfig(listOf(alarm(0, startMin = 16 * 60 + 6)), 0L), 1_000L, anchor + 800L, planAnchorWallMs = anchor)
+        assertTrue((s.snapshot(1_000L).untilNextMs ?: Long.MAX_VALUE) < 60_000L)
+    }
+
+    /** Незапущенная группа только на Пн: следующий запуск — через неделю, а не «завтра». */
+    @Test
+    fun idleMondayGroup_nextRunIsNextWeek() {
+        val g = group(0, 0b000_0001, alarm(0, startMin = 16 * 60 + 6))
+        val mondayEvening = wall(2026, 9, 28, 16, 8) // Пн 16:08, время прошло
+        val next = WakeScheduler.nextAutoStartWall(g, mondayEvening)
+        assertNotNull(next)
+        assertEquals(wall(2026, 10, 5, 16, 6), next) // следующий Пн
+    }
+
+
     // --- snapshot: остаток до конца, пауза, бесконечность ---
 
     @Test

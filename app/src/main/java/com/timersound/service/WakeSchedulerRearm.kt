@@ -35,7 +35,6 @@ object WakeSchedulerRearm {
     const val ACTION_WAKE = "com.timersound.intent.SCHEDULE_WAKE"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
     /**
      * Пересчитать и переставить общий будильник. Неблокирующий: уходит
      * в IO-скоп, onReceive держит goAsync() до конца работы.
@@ -48,13 +47,29 @@ object WakeSchedulerRearm {
         }
     }
 
-    /** Синхронная версия для очереди команд сервиса и тестов. */
+    /**
+     * Перевооружение по уже загруженному конфигу (из очереди команд сервиса
+     * и ViewModel): НЕ читает DataStore, поэтому нет второго инстанса
+     * DataStore на тот же файл (иначе — взаимоблокировка) и нет гонки
+     * с неприменённой командой.
+     */
+    fun rearmWith(context: Context, app: com.timersound.model.AppConfig) {
+        val appContext = context.applicationContext
+        scope.launch {
+            runCatching { rearmBlockingWith(appContext, app) }
+        }
+    }
+    /** Синхронная версия для ресиверов и тестов (читает DataStore сама). */
     suspend fun rearmBlocking(context: Context) {
+        val prefs = PreferencesRepository(context)
+        rearmBlockingWith(context, prefs.appConfig.first())
+    }
+
+    /** Синхронная версия по готовому конфигу: гонки с очередью команд нет. */
+    suspend fun rearmBlockingWith(context: Context, app: com.timersound.model.AppConfig) {
         val manager = runCatching {
             context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         }.getOrNull() ?: return
-        val prefs = PreferencesRepository(context)
-        val app = prefs.appConfig.first()
         val nowWallRead = System.currentTimeMillis()
         val autos = app.groups.mapNotNull { g ->
             WakeScheduler.nextAutoStartWall(g, nowWallRead)?.let { it to g.id }
@@ -73,16 +88,20 @@ object WakeSchedulerRearm {
             return
         }
         val triggerWall = nowWall + (nextElapsed - nowElapsed).coerceAtLeast(1_000L)
-        val anchorGroup = autoWalls.minOrNull()?.let { w ->
+        // Якорь = плановое wall-время автозапуска (ближайший autoStart), а не момент
+        // пробуждения: алярм срабатывает позже плана на мс, без якоря nextClockElapsed
+        // считает план «прошедшим» и уносит запуск на завтра.
+        val anchorWall = autoWalls.minOrNull()
+        val anchorGroup = anchorWall?.let { w ->
             autoGroups.entries.firstOrNull { it.key == w }?.value
         }
         try {
             if (canSchedule(manager)) {
                 manager.setAlarmClock(
                     AlarmManager.AlarmClockInfo(triggerWall, null),
-                    wakePendingIntent(context, anchorGroup),
+                    wakePendingIntent(context, anchorGroup, anchorWall),
                 )
-                AppLog.i("WakeSchedulerRearm: armed wall=$triggerWall group=$anchorGroup")
+                AppLog.i("WakeSchedulerRearm: armed wall=$triggerWall group=$anchorGroup anchor=$anchorWall")
             }
         } catch (e: SecurityException) {
             AppLog.w("WakeSchedulerRearm: exact denied: ${e.message}")
@@ -96,10 +115,13 @@ object WakeSchedulerRearm {
         return manager.canScheduleExactAlarms()
     }
 
-    fun wakePendingIntent(context: Context, anchorGroupId: Int? = null): PendingIntent {
+    fun wakePendingIntent(context: Context, anchorGroupId: Int? = null, planAnchorWallMs: Long? = null): PendingIntent {
         val intent = Intent(context, ScheduleWakeReceiver::class.java).setAction(ACTION_WAKE)
         if (anchorGroupId != null) {
             intent.putExtra(TimerSoundService.EXTRA_GROUP_ID, anchorGroupId)
+        }
+        if (planAnchorWallMs != null) {
+            intent.putExtra(TimerSoundService.EXTRA_PLAN_ANCHOR, planAnchorWallMs)
         }
         return PendingIntent.getBroadcast(
             context, WAKE_REQUEST_CODE, intent,

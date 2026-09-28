@@ -249,18 +249,19 @@ class AlarmCardFormattingTest {
     @Test
     fun timeFieldLabelsFollowConvention() {
         // Снапшот конвенции: время суток — «смысл (HH:MM)», длительность — «смысл (ЧЧ:ММ:СС)».
-        // Голый «ЧЧ:ММ:СС» без смысла (как было у AutoStopCard) — регрессия.
+        // Автостоп/лимит группы — кнопками-циклами в GroupDetail (текст «Автоостановка: …»).
         val source = readSource("main/java/com/timersound/ui/AlarmCard.kt") +
-            readSource("main/java/com/timersound/ui/App.kt")
+            readSource("main/java/com/timersound/ui/App.kt") +
+            readSource("main/java/com/timersound/ui/GroupDetail.kt")
         val labels = Regex("""label\s*=\s*"([^"]+)"""").findAll(source).map { it.groupValues[1] }.toList()
         val timeLabels = labels.filter { "(HH:MM" in it || "(ЧЧ:ММ:СС)" in it }
-        assertTrue(timeLabels.size >= 7, "ожидалось ≥7 лейблов времени, найдено: $timeLabels")
+        assertTrue(timeLabels.size >= 6, "ожидалось ≥6 лейблов времени, найдено: $timeLabels")
         timeLabels.forEach { label ->
             val prefix = label.substringBefore("(").trim()
             assertTrue(prefix.length >= 3, "лейбл без смысла: \"$label\"")
         }
-        assertTrue(timeLabels.any { it.startsWith("Авто-остановка через") })
         assertTrue(timeLabels.any { it.startsWith("Интервал между звуками") })
+        assertTrue("Автоостановка:" in source || "Авто-остановка" in source)
     }
 
     private fun readSource(relative: String): String {
