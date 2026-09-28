@@ -30,11 +30,30 @@ class DebugSeedReceiver : BroadcastReceiver() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onReceive(context: Context, intent: Intent?) {
+        val appCtx = context.applicationContext
+        // Команды сервису из adb (сервис не exported): --es cmd start|stop|pause|resume|restart --ei group 900
+        val cmd = intent?.getStringExtra("cmd")
+        if (cmd != null) {
+            val gid = intent.getIntExtra("group", 900)
+            val action = when (cmd) {
+                "start" -> com.timersound.service.TimerSoundService.ACTION_START
+                "stop" -> com.timersound.service.TimerSoundService.ACTION_STOP
+                "pause" -> com.timersound.service.TimerSoundService.ACTION_PAUSE
+                "resume" -> com.timersound.service.TimerSoundService.ACTION_RESUME
+                "restart" -> com.timersound.service.TimerSoundService.ACTION_RESTART
+                "reset" -> com.timersound.service.TimerSoundService.ACTION_RESET
+                else -> null
+            } ?: return
+            val svc = com.timersound.service.TimerSoundService.commandIntent(appCtx, action, gid)
+            if (cmd == "start") androidx.core.content.ContextCompat.startForegroundService(appCtx, svc)
+            else appCtx.startService(svc)
+            return
+        }
         val spec = intent?.getStringExtra("spec") ?: "once+1"
         val pending = goAsync()
         scope.launch {
             try {
-                seed(context.applicationContext, spec)
+                seed(appCtx, spec)
             } finally {
                 pending.finish()
             }
@@ -68,8 +87,8 @@ class DebugSeedReceiver : BroadcastReceiver() {
                     beep(alarmId++, "INT$n", SceneMode.INTERVAL, (curMin + 1) % 1440)
                         .copy(intervalMs = 15_000L, launchCount = n)
                 }
-                p == "random" -> beep(alarmId++, "RND", SceneMode.RANDOM, curMin)
-                    .copy(endMinutes = (curMin + 2) % 1440, launchCount = 3)
+                p == "random" -> beep(alarmId++, "RND", SceneMode.RANDOM, (curMin + 1) % 1440)
+                    .copy(endMinutes = (curMin + 3) % 1440, launchCount = 3)
                 else -> null
             }
         }
@@ -86,6 +105,7 @@ class DebugSeedReceiver : BroadcastReceiver() {
         prefs.saveGroups(cur.copy(groups = groups))
         val back = prefs.appConfig.first()
         android.util.Log.i("TimerSound", "DebugSeed: spec=$spec groups=${groups.size} readback=${back.groups.map { it.id }}")
+        com.timersound.service.WakeSchedulerRearm.rearmWith(context, cur.copy(groups = groups))
     }
 
     private fun beep(id: Int, name: String, mode: SceneMode, startMin: Int?): AlarmConfig =

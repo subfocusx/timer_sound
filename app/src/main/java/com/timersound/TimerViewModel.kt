@@ -177,6 +177,12 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         send(TimerSoundService.ACTION_RESET, id)
     }
 
+    /** Сброс сессии группы в IDLE: счётчики чистятся (GroupRuntime убирается). */
+    fun resetGroup(groupId: Int) {
+        TimerStateHolder.removeGroup(groupId)
+        send(TimerSoundService.ACTION_RESET, groupId)
+    }
+
     fun selectGroup(groupId: Int) {
         _selectedGroupId.value = groupId
     }

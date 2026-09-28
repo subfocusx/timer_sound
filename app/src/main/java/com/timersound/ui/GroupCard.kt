@@ -149,6 +149,13 @@ fun GroupCard(
                         ) { Icon(Icons.Default.Stop, contentDescription = "Стоп") }
                     }
                 }
+                if (state == TimerState.COMPLETED) {
+                    // Сброс завершённой сессии в IDLE: чистит счётчики (GroupRuntime убирается).
+                    IconButton(
+                        onClick = { vm.resetGroup(group.id) },
+                        modifier = Modifier.testTag("group_reset_${group.id}"),
+                    ) { Text("Сброс") }
+                }
                 if (state != TimerState.IDLE) {
                     IconButton(
                         onClick = { vm.restartGroup(group.id) },
@@ -187,16 +194,16 @@ private fun StateBadge(state: TimerState, groupId: Int) {
     }
 }
 
-/** Чипы дней недели Пн–Вс. */
+/** Чипы дней недели Пн–Вс. Компактные: 7 шт в ряд на узком экране (иначе «Вс» не влезает). */
 @Composable
 fun WeekdayChips(mask: Int, enabled: Boolean, onToggle: (Int) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         (1..7).forEach { day ->
             FilterChip(
                 selected = Weekdays.isSet(mask, day),
                 enabled = enabled,
                 onClick = { onToggle(day) },
-                label = { Text(DAY_SHORT[day - 1]) },
+                label = { Text(DAY_SHORT[day - 1], style = MaterialTheme.typography.labelSmall, maxLines = 1) },
                 modifier = Modifier.testTag("weekday_${day}"),
             )
         }

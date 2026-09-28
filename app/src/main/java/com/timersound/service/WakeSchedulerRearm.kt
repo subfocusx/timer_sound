@@ -88,10 +88,14 @@ object WakeSchedulerRearm {
             return
         }
         val triggerWall = nowWall + (nextElapsed - nowElapsed).coerceAtLeast(1_000L)
-        // Якорь = плановое wall-время автозапуска (ближайший autoStart), а не момент
-        // пробуждения: алярм срабатывает позже плана на мс, без якоря nextClockElapsed
-        // считает план «прошедшим» и уносит запуск на завтра.
-        val anchorWall = autoWalls.minOrNull()
+        // Якорь = плановое wall-время автозапуска, но ТОЛЬКО если будит именно
+        // автозапуск (его wall раньше ближайшего события сессии). Иначе ресивер
+        // получил бы чужую группу и стартовал её посреди чужого тика.
+        val nearestAuto = autoWalls.minOrNull()
+        val nearestSession = sessionNext.filter { it > nowElapsed }.minOrNull()
+        val autoWins = nearestAuto != null &&
+            (nearestSession == null || nearestAuto + (nowElapsed - nowWall) <= nearestSession)
+        val anchorWall = if (autoWins) nearestAuto else null
         val anchorGroup = anchorWall?.let { w ->
             autoGroups.entries.firstOrNull { it.key == w }?.value
         }
