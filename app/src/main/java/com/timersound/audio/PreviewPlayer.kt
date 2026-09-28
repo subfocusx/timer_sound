@@ -39,10 +39,14 @@ object PreviewPlayer {
     @Volatile
     private var currentAlarmId: Int? = null
 
+    @Volatile
+    private var currentGroupId: Int = 0
+
     private var tickerJob: Job? = null
 
     data class State(
         val alarmId: Int,
+        val groupId: Int = 0,
         val isPlaying: Boolean,
         val positionMs: Long,
         val durationMs: Long,
@@ -60,6 +64,7 @@ object PreviewPlayer {
             val id = currentAlarmId ?: return
             _state.value = State(
                 alarmId = id,
+                groupId = currentGroupId,
                 isPlaying = p.isPlaying,
                 positionMs = p.currentPosition,
                 durationMs = p.duration,
@@ -70,7 +75,7 @@ object PreviewPlayer {
     // ------------------------------------------------------------------ API
 
     /** Запустить воспроизведение будильника (URI или встроенный beep). */
-    fun play(context: Context, alarm: AlarmConfig) {
+    fun play(context: Context, alarm: AlarmConfig, groupId: Int = 0) {
         stop()
         val uri = alarm.fileUri
         val isBeep = uri == Defaults.BUILT_IN_BEEP
@@ -115,6 +120,7 @@ object PreviewPlayer {
         })
         player = exoPlayer
         currentAlarmId = alarm.id
+        currentGroupId = groupId
         updateState()
         startTicker()
         AppLog.i("Запущен превью-плеер для alarmId=${alarm.id}")

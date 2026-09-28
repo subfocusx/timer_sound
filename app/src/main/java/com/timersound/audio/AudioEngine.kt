@@ -39,11 +39,13 @@ object AudioEngine {
     const val FADE_IN_STEP_MS = 100L
     const val FADE_IN_STEPS = 20
 
-    /** Session channel players (key = channel id). LinkedHashMap для FIFO (стоп самых старых). */
-    private val players = LinkedHashMap<Int, Ringtone>()
-    private val previewPlayers = mutableMapOf<Int, Ringtone>()
+    /** Уникальный ключ звука: (groupId, alarmId). */
+    data class RingKey(val groupId: Int, val alarmId: Int)
+
+    /** Session channel players (key = RingKey). LinkedHashMap для FIFO (стоп самых старых). */
+    private val players = LinkedHashMap<RingKey, Ringtone>()
+    private val previewPlayers = mutableMapOf<RingKey, Ringtone>()
     private val lock = Any()
-    private val fadeScope = CoroutineScope(Dispatchers.Default)
     /**
      * Сколько раз за сессию сработал лимит одновременных звуков (старые глушились).
      * Сбрасывается в [releaseAll]. Читается сервисом для видимого предупреждения.
@@ -60,19 +62,23 @@ object AudioEngine {
      * Ring channel signal once (interval fire). If the channel is still sounding
      * from the previous interval - the ringtone is stopped and re-created.
      */
-    fun play(context: Context, alarm: AlarmConfig, fadeIn: Boolean = false) {
+    fun play(context: Context, alarm: AlarmConfig, fadeIn: Boolean = false, groupId: Int = 0) {
+        playKeyed(context, RingKey(groupId, alarm.id), alarm, fadeIn)
+    }
+
+    /** Ключ (groupId, alarmId): стоп одной группы не глушит звук другой. */
+    fun playKeyed(context: Context, key: RingKey, alarm: AlarmConfig, fadeIn: Boolean = false) {
         val ringRef: Ringtone?
         val targetVolume: Float
         synchronized(lock) {
             try {
                 val ring = createRingtone(context, alarm)
                 if (ring == null) {
-                    Log.w(TAG, "AudioEngine.play: NO ringtone ch=${alarm.id} uri=${alarm.fileUri} - aborted")
+                    Log.w(TAG, "AudioEngine.play: NO ringtone key=$key uri=${alarm.fileUri} - aborted")
                     return
                 }
-                players.remove(alarm.id)?.let { runCatching { it.stop() } }
+                players.remove(key)?.let { runCatching { it.stop() } }
                 val dropped = droppedFor(players.size, incomingNewChannel = true)
-                // MAX_CONCURRENT_RINGS: стоп самых старых если лимит достигнут.
                 while (players.size >= MAX_CONCURRENT_RINGS) {
                     val oldestId = players.entries.first().key
                     Log.w(TAG, "MAX_CONCURRENT_RINGS=$MAX_CONCURRENT_RINGS: стоп самого старого id=$oldestId")
@@ -81,22 +87,21 @@ object AudioEngine {
                 if (dropped > 0) _droppedRingsCount.value += dropped
                 targetVolume = alarm.volumePercent / 100f
                 ring.setVolume(if (fadeIn) 0f else targetVolume)
-                players[alarm.id] = ring
-                Log.i(TAG, "AudioEngine.play: calling ring.play() ch=${alarm.id} uri=${alarm.fileUri}")
+                players[key] = ring
+                Log.i(TAG, "AudioEngine.play: calling ring.play() key=$key uri=${alarm.fileUri}")
                 ring.play()
-                Log.i(TAG, "AudioEngine.play: returned OK ch=${alarm.id}")
+                Log.i(TAG, "AudioEngine.play: returned OK key=$key")
                 ringRef = ring
             } catch (e: Exception) {
-                Log.e(TAG, "AudioEngine.play: EXCEPTION ch=${alarm.id} uri=${alarm.fileUri}: ${e}", e)
+                Log.e(TAG, "AudioEngine.play: EXCEPTION key=$key uri=${alarm.fileUri}: ${e}", e)
                 return
             }
         }
-        // Плавное нарастание — вне lock, чтобы не держать монитор ~2 секунды.
         if (fadeIn && ringRef != null) {
             fadeScope.launch {
                 repeat(FADE_IN_STEPS) { i ->
                     delay(FADE_IN_STEP_MS)
-                    val stillCurrent = synchronized(lock) { players[alarm.id] === ringRef }
+                    val stillCurrent = synchronized(lock) { players[key] === ringRef }
                     if (!stillCurrent) return@launch
                     runCatching { ringRef.setVolume(targetVolume * (i + 1) / FADE_IN_STEPS) }
                 }
@@ -105,13 +110,14 @@ object AudioEngine {
     }
 
     /** One-shot preview of a channel signal (not tied to the timer session). */
-    fun preview(context: Context, alarm: AlarmConfig) {
+    fun preview(context: Context, alarm: AlarmConfig, groupId: Int = 0) {
         synchronized(lock) {
             try {
+                val key = RingKey(groupId, alarm.id)
                 val ring = createRingtone(context, alarm) ?: return
-                previewPlayers.remove(alarm.id)?.let { runCatching { it.stop() } }
+                previewPlayers.remove(key)?.let { runCatching { it.stop() } }
                 ring.setVolume(alarm.volumePercent / 100f)
-                previewPlayers[alarm.id] = ring
+                previewPlayers[key] = ring
                 ring.play()
             } catch (e: Exception) {
                 Log.w(TAG, "AudioEngine.preview: ch=${alarm.id} uri=${alarm.fileUri}: $e")
@@ -129,10 +135,27 @@ object AudioEngine {
     }
 
     /** Stop and release a specific channel. */
-    fun stopChannel(channelId: Int) {
+    fun stopChannel(channelId: Int, groupId: Int = 0) {
+        stopKey(RingKey(groupId, channelId))
+    }
+
+    /** Стоп по ключу (groupId, alarmId). */
+    fun stopKey(key: RingKey) {
         synchronized(lock) {
-            players.remove(channelId)?.let { runCatching { it.stop() } }
-            previewPlayers.remove(channelId)?.let { runCatching { it.stop() } }
+            players.remove(key)?.let { runCatching { it.stop() } }
+            previewPlayers.remove(key)?.let { runCatching { it.stop() } }
+        }
+    }
+
+    /** Стоп всех звуков одной группы (STOP группы не глушит другие). */
+    fun stopGroup(groupId: Int) {
+        synchronized(lock) {
+            players.keys.filter { it.groupId == groupId }.forEach { k ->
+                players.remove(k)?.let { runCatching { it.stop() } }
+            }
+            previewPlayers.keys.filter { it.groupId == groupId }.forEach { k ->
+                previewPlayers.remove(k)?.let { runCatching { it.stop() } }
+            }
         }
     }
 

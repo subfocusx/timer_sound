@@ -50,26 +50,23 @@ import com.timersound.timer.TimerState
  */
 class TimerSoundService : Service() {
 
-    private enum class Command { START, PAUSE, RESUME, STOP, RESET, TICK }
+    private data class QueuedCommand(val kind: Command, val groupId: Int = -1)
+    private enum class Command { START, PAUSE, RESUME, STOP, RESET, TICK, PAUSE_ALL, STOP_ALL, AUTO_START }
 
-    /**
-     * Все команды и тики идут СТРОГО последовательно (один поток): у сессии два
-     * входа срабатывания — точный алярм (AlarmManager) и тик-цикл, — а
-     * [TimerSession] не потокобезопасна. При параллельном входе две нити видели
-     * одно и то же «пора звучать», обе жгли звук, а одна из них обнуляла
-     * расписание — сессия «N раз» завершалась на первом же срабатывании.
-     */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
-    private val commands = Channel<Command>(Channel.UNLIMITED)
-    private val session = TimerSession()
+    private val commands = Channel<QueuedCommand>(Channel.UNLIMITED)
+    /** Один TimerSession на каждую активную группу. */
+    private val sessions = mutableMapOf<Int, TimerSession>()
     private lateinit var prefs: PreferencesRepository
     private var wakeLock: PowerManager.WakeLock? = null
     private var mediaSession: MediaSession? = null
     private var alarmManager: AlarmManager? = null
     private var usingExactAlarm = false
     private var tickJob: Job? = null
-    /** Флаг fade-in из конфига на момент старта сессии. */
+    /** Флаг fade-in глобальный (fadeIn — поле AppConfig). */
     private var fadeInEnabled = false
+    private val activeGroupIds: MutableSet<Int>
+        get() = sessions.keys
 
     override fun onCreate() {
         super.onCreate()
@@ -80,13 +77,9 @@ class TimerSoundService : Service() {
         alarmManager = runCatching { getSystemService(Context.ALARM_SERVICE) as AlarmManager }.getOrNull()
         registerThermalListener()
         startCommandConsumer()
+        // Автозапуски после перезагрузки/обновления пересчитывает WakeSchedulerRearm.
     }
 
-    /**
-     * А3: подписка на термальный статус (API 29+). SEVERE+ — зажимаем тик на
-     * редкий и не продлеваем wake lock агрессивно; CRITICAL — предлагаем
-     * пользователю приостановить сессию через уведомление.
-     */
     private var thermalStatus: Int = PowerManager.THERMAL_STATUS_NONE
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
 
@@ -98,7 +91,7 @@ class TimerSoundService : Service() {
         val listener = PowerManager.OnThermalStatusChangedListener { status ->
             thermalStatus = status
             AppLog.i("TimerSoundService: thermal status -> $status")
-            if (status >= PowerManager.THERMAL_STATUS_CRITICAL && session.isActive) {
+            if (status >= PowerManager.THERMAL_STATUS_CRITICAL && sessions.values.any { it.isActive }) {
                 showThermalNotification()
             }
         }
@@ -113,16 +106,24 @@ class TimerSoundService : Service() {
         thermalListener = null
     }
 
-    // ------------------------------------------------------------------ commands
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val gid = intent?.getIntExtra(EXTRA_GROUP_ID, -1) ?: -1
         when (intent?.action) {
-            ACTION_START -> commands.trySend(Command.START)
-            ACTION_PAUSE -> commands.trySend(Command.PAUSE)
-            ACTION_RESUME -> commands.trySend(Command.RESUME)
-            ACTION_STOP -> commands.trySend(Command.STOP)
-            ACTION_RESET -> commands.trySend(Command.RESET)
-            ACTION_TICK -> commands.trySend(Command.TICK)
+            ACTION_START -> commands.trySend(QueuedCommand(Command.START, gid))
+            ACTION_AUTO_START -> {
+                intentCache[gid] = intent.getLongExtra(EXTRA_PLAN_ANCHOR, -1L).takeIf { it >= 0 }
+                commands.trySend(QueuedCommand(Command.AUTO_START, gid))
+            }
+            ACTION_PAUSE -> commands.trySend(QueuedCommand(Command.PAUSE, gid))
+            ACTION_RESUME -> commands.trySend(QueuedCommand(Command.RESUME, gid))
+            ACTION_STOP -> commands.trySend(QueuedCommand(Command.STOP, gid))
+            ACTION_RESET -> commands.trySend(QueuedCommand(Command.RESET, gid))
+            ACTION_RESTART -> commands.trySend(QueuedCommand(Command.STOP, gid)).also {
+                commands.trySend(QueuedCommand(Command.START, gid))
+            }
+            ACTION_PAUSE_ALL -> commands.trySend(QueuedCommand(Command.PAUSE_ALL))
+            ACTION_STOP_ALL -> commands.trySend(QueuedCommand(Command.STOP_ALL))
+            ACTION_TICK -> commands.trySend(QueuedCommand(Command.TICK))
         }
         return START_NOT_STICKY
     }
@@ -144,125 +145,168 @@ class TimerSoundService : Service() {
      * конфига до того, как consumer заберёт STOP. Отдельного fire-and-forget
      * scope.launch здесь было источником подъёма сессии после остановки.
      */
-    private suspend fun handleCommand(command: Command) {
-        when (command) {
-            Command.START -> handleStart()
-            Command.PAUSE -> handlePause()
-            Command.RESUME -> handleResume()
-            Command.STOP -> handleStop(completed = false)
-            Command.RESET -> handleReset()
+    private suspend fun handleCommand(cmd: QueuedCommand) {
+        when (cmd.kind) {
+            Command.START -> handleStart(cmd.groupId)
+            Command.AUTO_START -> handleAutoStart(cmd.groupId)
+            Command.PAUSE -> handlePause(cmd.groupId)
+            Command.RESUME -> handleResume(cmd.groupId)
+            Command.STOP -> handleStop(cmd.groupId, completed = false)
+            Command.RESET -> handleReset(cmd.groupId)
             Command.TICK -> onAlarmTick()
+            Command.PAUSE_ALL -> handlePauseAll()
+            Command.STOP_ALL -> handleStopAll()
         }
     }
 
-    private suspend fun handleStart() {
-        val config = prefs.config.first()
-        if (config.playableAlarms().isEmpty()) {
-            handleStop(completed = false)
-            return
-        }
-        AudioEngine.releaseAll()
+    private fun sessionOf(groupId: Int): TimerSession =
+        sessions.getOrPut(groupId) { TimerSession() }
+
+    private suspend fun handleStart(groupId: Int, planAnchorWallMs: Long? = null) {
+        val app = prefs.appConfig.first()
+        fadeInEnabled = app.fadeInEnabled
+        val group = app.groups.firstOrNull { it.id == groupId } ?: return
+        val runConfig = group.toRunConfig(fadeInEnabled)
+        if (runConfig.playableAlarms().isEmpty()) return
+        AudioEngine.stopGroup(groupId)
         PreviewPlayer.stop()
-        fadeInEnabled = config.fadeInEnabled
-        prefs.setSessionActive(true)
-        session.start(config)
-        Log.i(TAG, "handleStart: playableTasks=${config.playableAlarms().size}, nextEvent=${session.nextEventElapsedMs()}")
+        val session = sessionOf(groupId)
+        session.start(runConfig, planAnchorWallMs = planAnchorWallMs)
+        prefs.setActiveGroups(sessions.keys.filter { sessions[it]?.isActive == true }.toSet())
+        Log.i(TAG, "handleStart: group=$groupId playable=${runConfig.playableAlarms().size}")
         acquireWakeLock()
         setupMediaSession(playing = true)
         startAsForeground()
-        // Первый тик — сразу после старта: здесь важен ТОЛЬКО факт завершения
-        // сессии. Срабатывание канала — не повод её останавливать (иначе первый
-        // же звук глушился releaseAll() и сессия уходила в COMPLETED).
-        if (handleTick()) {
-            handleAutoStop(playOutLastRing = true)
+        publishGroup(groupId)
+        if (handleTickGroup(groupId)) {
+            handleAutoStop(groupId, playOutLastRing = true)
             return
         }
         startTickLoop()
         scheduleExactAlarm()
+        WakeSchedulerRearm.rearm(this)
     }
 
-    private fun handlePause() {
-        session.pause()
-        cancelExactAlarm()
-        releaseWakeLock()
-        updateMediaSession(playing = false)
+    /** Автозапуск по расписанию: пропуск, если группа уже RUNNING/PAUSED. */
+    private suspend fun handleAutoStart(groupId: Int) {
+        val existing = sessions[groupId]
+        if (existing != null && existing.isActive) {
+            AppLog.i("TimerSoundService: автозапуск группы $groupId пропущен (уже активна)")
+            return
+        }
+        val intent = intentCache.remove(groupId)
+        handleStart(groupId, planAnchorWallMs = intent)
+    }
+
+    private fun handlePause(groupId: Int) {
+        sessions[groupId]?.pause()
+        releaseWakeLockIfIdle()
+        updateMediaSession(playing = sessions.values.any { it.isRunning })
         refreshNotification()
-        publishUiSnapshot()
+        publishGroup(groupId)
+        WakeSchedulerRearm.rearm(this)
     }
 
-    private fun handleResume() {
-        session.resume()
-        scheduleExactAlarm()
+    private fun handleResume(groupId: Int) {
+        sessions[groupId]?.resume()
         acquireWakeLock()
         updateMediaSession(playing = true)
-        publishUiSnapshot()
+        publishGroup(groupId)
+        scheduleExactAlarm()
+        WakeSchedulerRearm.rearm(this)
     }
 
-    private fun handleReset() {
+    /** Restart = атомарно Stop + Start в очереди команд, с новым epoch. */
+    private suspend fun handleRestart(groupId: Int) {
+        stopGroupInternal(groupId)
+        handleStart(groupId)
+    }
+
+    private fun handleReset(groupId: Int) {
+        sessions[groupId]?.reset()
+        TimerStateHolder.removeGroup(groupId)
+        sessions.remove(groupId)
+        AudioEngine.stopGroup(groupId)
+        afterGroupGone()
+    }
+
+    private fun handlePauseAll() {
+        sessions.keys.toList().forEach { sessions[it]?.pause() }
+        releaseWakeLockIfIdle()
+        updateMediaSession(playing = false)
+        refreshNotification()
+        publishAll()
+    }
+
+    private suspend fun handleStopAll() {
+        val ids = sessions.keys.toList()
+        for (id in ids) stopGroupInternal(id)
+        afterGroupGone()
+    }
+
+    /** STOP группы: чистим её сессию и звук; следующий автозапуск остаётся по расписанию. */
+    private suspend fun handleStop(groupId: Int, completed: Boolean) {
+        stopGroupInternal(groupId)
+        if (completed) showCompletedNotification()
+        afterGroupGone()
+    }
+
+    private suspend fun stopGroupInternal(groupId: Int) {
         cancelExactAlarm()
-        session.reset()
-        TimerStateHolder.reset()
-        if (!session.isActive) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+        sessions[groupId]?.stop()
+        AudioEngine.stopGroup(groupId)
+        TimerStateHolder.removeGroup(groupId)
+        sessions.remove(groupId)
+        prefs.setActiveGroups(sessions.keys.filter { sessions[it]?.isActive == true }.toSet())
+    }
+
+    /** Сервис останавливается только когда не осталось активных сессий. */
+    private suspend fun afterGroupGone() {
+        publishAll()
+        if (sessions.values.any { it.isActive }) {
+            scheduleExactAlarm()
+            refreshNotification()
+            WakeSchedulerRearm.rearm(this)
+            return
         }
-    }
-
-    /** STOP / завершение: освобождает аудио, снимает FGS, останавливает сервис. */
-    private suspend fun handleStop(completed: Boolean) {
-        cancelExactAlarm()
         stopTickLoop()
-        AudioEngine.releaseAll()
-        session.stop()
+        cancelExactAlarm()
         releaseWakeLock()
         releaseMediaSession()
         stopForeground(STOP_FOREGROUND_REMOVE)
+        prefs.setActiveGroups(emptySet())
         prefs.setSessionActive(false)
-        if (completed) {
-            showCompletedNotification()
-            TimerStateHolder.setState(TimerState.COMPLETED)
-        } else {
-            TimerStateHolder.reset()
-        }
+        refreshNotification()
         stopSelf()
     }
 
-    /**
-     * Завершение сессии: сценарий отыгран целиком либо сработала авто-остановка.
-     *
-     * [playOutLastRing] = true, когда сессию закрыло её собственное последнее
-     * срабатывание (ONCE_TIME / INTERVAL / RANDOM). Такой звук только что
-     * стартовал и должен доиграть файл: без этого `handleStop` вызывался тем же
-     * тиком, который запустил Ringtone, — `releaseAll()` глушил его мгновенно, и
-     * режимы «Один раз»/«N раз»/«Случайно» выглядели как «звука нет».
-     *
-     * Авто-остановка по таймеру ([playOutLastRing] = false) глушит всё сразу —
-     * так задумано: пользователь задал момент остановки.
-     */
-    private suspend fun handleAutoStop(playOutLastRing: Boolean = false) {
-        stopTickLoop()
-        cancelExactAlarm()
-        publishUiSnapshot(stateOverride = TimerState.COMPLETED)
+    private fun releaseWakeLockIfIdle() {
+        if (sessions.values.none { it.isRunning }) releaseWakeLock()
+    }
+
+    private val intentCache = mutableMapOf<Int, Long?>()
+
+    private suspend fun handleAutoStop(groupId: Int, playOutLastRing: Boolean = false) {
+        val session = sessions[groupId] ?: return
+        publishGroup(groupId, stateOverride = TimerState.COMPLETED)
         if (!playOutLastRing) {
-            handleStop(completed = true)
+            AudioEngine.stopGroup(groupId)
+            handleStop(groupId, completed = true)
             return
         }
-        // Сессия завершена: FGS-уведомление снимаем сразу, но процесс доживает
-        // последний звук (Ringtone играет файл один раз) и только потом уходит.
         stopForeground(STOP_FOREGROUND_REMOVE)
         showCompletedNotification()
-        TimerStateHolder.setState(TimerState.COMPLETED)
-        // Баг 6: отложенный teardown сверяет epoch, а не грубый enum. Пока звук
-        // доигрывал, пользователь мог нажать «Запустить заново» — handleStart()
-        // поднял новую сессию (epoch вырос), и снос старой здесь запрещён.
         val completedEpoch = session.epoch
         scope.launch {
             awaitLastRingFinished()
-            if (session.epoch != completedEpoch) {
-                AppLog.i("TimerSoundService: teardown пропущен, сессия уже новая (epoch $completedEpoch -> ${session.epoch})")
+            if (sessions[groupId]?.epoch != completedEpoch) {
+                AppLog.i("TimerSoundService: teardown пропущен, сессия уже новая (epoch $completedEpoch)")
                 return@launch
             }
-            if (session.state == TimerState.COMPLETED) handleStop(completed = true)
+            if (sessions[groupId]?.state == TimerState.COMPLETED) {
+                AudioEngine.stopGroup(groupId)
+                handleStop(groupId, completed = true)
+            }
         }
     }
 
@@ -290,32 +334,21 @@ class TimerSoundService : Service() {
             var lastWakeLockRenewMs = 0L
             while (isActive) {
                 val now = SystemClock.elapsedRealtime()
-                val autoStopDeadlineHit: Boolean = if (session.isRunning) {
-                    val autoStopDeadline = session.countdownToAutoStopMs(now)
-                    autoStopDeadline != null && autoStopDeadline <= 0L
-                } else {
-                    false
+                var workLeft = false
+                for ((gid, session) in sessions.toMap()) {
+                    if (!session.isRunning) continue
+                    workLeft = true
+                    val autoHit = session.countdownToAutoStopMs(now)?.let { it <= 0L } == true
+                    if (autoHit) {
+                        handleAutoStop(gid, playOutLastRing = false)
+                        continue
+                    }
+                    if (handleTickGroup(gid, now)) {
+                        handleAutoStop(gid, playOutLastRing = true)
+                    }
                 }
-                val scenarioCompleted: Boolean = if (session.isRunning && !autoStopDeadlineHit) {
-                    // Возврат handleTick означает, что серия отработала/сессия завершена:
-                    // его НЕЛЬЗЯ терять, иначе сервис останется висеть FGS со старым уведомлением.
-                    handleTick(now)
-                } else {
-                    false
-                }
-                if (autoStopDeadlineHit) {
-                    handleAutoStop(playOutLastRing = false)
-                    return@launch
-                }
-                if (scenarioCompleted) {
-                    // Серия закрылась последним срабатыванием — даём звуку доиграть.
-                    handleAutoStop(playOutLastRing = true)
-                    return@launch
-                }
-                if (session.isActive) {
-                    // А2: короткие продления wake lock (~2 мин), пока сессия реально активна —
-                    // лок не протухает посреди долгой сессии и не висит дольше нужного.
-                    // А3: при перегреве не продлеваем агрессивно.
+                if (sessions.values.any { it.isActive }) {
+                    workLeft = true
                     val overheatedNow = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE
                     } else false
@@ -323,92 +356,70 @@ class TimerSoundService : Service() {
                         renewWakeLock()
                         lastWakeLockRenewMs = now
                     }
-                    // Уведомление обновляем ~1 раз в секунду, состояние — каждый тик.
                     if (counter % 4 == 0) refreshNotification()
-                    publishUiSnapshot()
-                } else {
-                    // Сессия завершилась/сброшена вне тик-цикла (алярм, авто-остановка, STOP):
-                    // публикуем актуальное состояние и выходим, не держа FGS вхолостую.
-                    publishUiSnapshot(stateOverride = session.state)
-                    if (session.state == TimerState.COMPLETED) handleAutoStop(playOutLastRing = true)
-                    return@launch
+                    publishAll()
                 }
+                if (!workLeft && sessions.isEmpty()) return@launch
                 counter++
-                // А3: при SEVERE+ полагаемся на точный будильник, тик — минимум.
                 val overheated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE
                 } else false
-                if (overheated) {
-                    delay(5_000L)
-                } else {
-                    // А1: адаптивный шаг — вдали от события спим дольше, не греем CPU.
-                    delay(adaptiveTickDelayMs(now))
-                }
+                if (overheated) delay(5_000L) else delay(adaptiveTickDelayMs(now))
             }
         }
     }
 
-    /**
-     * А1: шаг тика по расстоянию до ближайшего события. Рядом (< 5 с) — частый
-     * тик для точности; дальше — редкий, точное срабатывание страхует
-     * scheduleExactAlarm. Чистая функция — тестируется без Android.
-     */
-    internal fun adaptiveTickDelayMs(
-        nowElapsedMs: Long,
-        nextEventMs: Long? = session.nextEventElapsedMs(nowElapsedMs),
-    ): Long = TickPolicy.delayMs(nextEventMs?.let { it - nowElapsedMs })
+    internal fun adaptiveTickDelayMs(nowElapsedMs: Long): Long {
+        val next = sessions.values.mapNotNull { it.nextEventElapsedMs(nowElapsedMs) }.minOrNull()
+        return TickPolicy.delayMs(next?.let { it - nowElapsedMs })
+    }
 
     private fun stopTickLoop() {
         tickJob?.cancel()
         tickJob = null
     }
 
-    /**
-     * Один тик сессии. Возвращает true, только если сценарий ЗАВЕРШЁН
-     * (все конечные серии отыграны или наступила авто-остановка).
-     * Само срабатывание канала завершением не является.
-     */
-    private fun handleTick(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Boolean {
-        val nextEvent = session.nextEventElapsedMs(nowElapsedMs)
-        val wall = System.currentTimeMillis()
-        Log.i(TAG, "tick state=${session.state} nextEventElapsedMs=$nextEvent wall=$wall")
+    private fun handleTickGroup(groupId: Int, nowElapsedMs: Long = SystemClock.elapsedRealtime()): Boolean {
+        val session = sessions[groupId] ?: return false
         val completed = session.tick(nowElapsedMs) { channel ->
-            Log.i(TAG, "tick alarmFired=true state=${session.state} nextEventElapsedMs=${session.nextEventElapsedMs(nowElapsedMs)} wall=${System.currentTimeMillis()}")
-            AudioEngine.play(applicationContext, channel, fadeIn = fadeInEnabled)
+            AudioEngine.play(applicationContext, channel, fadeIn = fadeInEnabled, groupId = groupId)
         }
+        publishGroup(groupId)
         return completed || session.state == TimerState.COMPLETED
     }
 
     private suspend fun onAlarmTick() {
-        if (session.state != TimerState.RUNNING) return
-        // Это пробуждение сервиса точным алярмом, а НЕ гарантированное срабатывание канала:
-        // о самом срабатывании пишет строка «tick alarmFired=true» из handleTick.
-        Log.i(TAG, "alarmWake=true state=${session.state} nextEventElapsedMs=${session.nextEventElapsedMs()} wall=${System.currentTimeMillis()}")
-        handleTick()
-        if (session.state == TimerState.COMPLETED) {
-            handleAutoStop(playOutLastRing = true)
-        } else {
-            scheduleExactAlarm()
+        var anyRunning = false
+        for ((gid, session) in sessions.toMap()) {
+            if (session.state != TimerState.RUNNING) continue
+            anyRunning = true
+            handleTickGroup(gid)
+            if (session.state == TimerState.COMPLETED) handleAutoStop(gid, playOutLastRing = true)
         }
+        if (anyRunning) scheduleExactAlarm() else WakeSchedulerRearm.rearm(this)
     }
 
+
+    /**
+     * Один общий точный алярм: минимум из следующих событий активных сессий.
+     * Автозапуски групп держит WakeSchedulerRearm (отдельный PendingIntent).
+     */
     private fun scheduleExactAlarm() {
         val manager = alarmManager
-        if (manager == null || session.state != TimerState.RUNNING || !canScheduleExactAlarm()) {
+        val anyRunning = sessions.values.any { it.state == TimerState.RUNNING }
+        if (manager == null || !anyRunning || !canScheduleExactAlarm()) {
             usingExactAlarm = false
             return
         }
-
-        val nextEvent = session.nextEventElapsedMs() ?: return
-        val delayMs = (nextEvent - SystemClock.elapsedRealtime()).coerceAtLeast(1_000L)
+        val now = SystemClock.elapsedRealtime()
+        val nextEvent = sessions.values.mapNotNull { it.nextEventElapsedMs(now) }.minOrNull() ?: return
+        val delayMs = (nextEvent - now).coerceAtLeast(1_000L)
         val triggerAtWallMs = System.currentTimeMillis() + delayMs
         val pending = exactAlarmPendingIntent()
-
         try {
             manager.cancel(pending)
             manager.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAtWallMs, null), pending)
             usingExactAlarm = true
-            Log.i(TAG, "alarmScheduled=true state=${session.state} nextEventElapsedMs=$nextEvent delayMs=$delayMs wall=$triggerAtWallMs")
         } catch (error: SecurityException) {
             usingExactAlarm = false
             Log.w(TAG, "exact alarm denied: ${error.message}")
@@ -418,83 +429,21 @@ class TimerSoundService : Service() {
         }
     }
 
-    private fun exactAlarmPendingIntent(): PendingIntent =
-        PendingIntent.getService(
-            this,
-            ALARM_TICK_REQUEST_CODE,
-            commandIntent(this, ACTION_TICK),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-
-    private fun cancelExactAlarm() {
-        if (!usingExactAlarm) return
-        alarmManager?.cancel(exactAlarmPendingIntent())
-        usingExactAlarm = false
-        Log.i(TAG, "exactAlarmCancelled=true")
+    private fun publishGroup(groupId: Int, stateOverride: TimerState? = null) {
+        val session = sessions[groupId] ?: return
+        val now = SystemClock.elapsedRealtime()
+        val snap = session.snapshot(now)
+        val forced = stateOverride?.let {
+            TimerSession.SessionSnapshot(it, snap.fires, snap.untilNextMs, snap.untilEndMs, snap.remainingFires, snap.totalFiresCount)
+        } ?: snap
+        TimerStateHolder.publishSnapshot(groupId, forced, now, AudioEngine.droppedRingsCount.value)
     }
 
-    private fun canScheduleExactAlarm(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
-        // Только AlarmManager.canScheduleExactAlarms(): он учитывает и appop SCHEDULE_EXACT_ALARM,
-        // и USE_EXACT_ALARM (обычное разрешение, выдаётся при установке).
-        // Отдельная проверка самого SCHEDULE_EXACT_ALARM отсекала объявившие USE_EXACT_ALARM
-        // приложения: на API 33+ она возвращает DENIED, хотя капабилити — true, и точный
-        // будильник не планировался вообще (проверено на API 35: DENIED + canSchedule=true).
-        return alarmManager?.canScheduleExactAlarms() == true
-    }
-
-    // ------------------------------------------------------------------ notification
-
-    private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Работа таймера",
-            NotificationManager.IMPORTANCE_LOW,
-        ).apply {
-            description = "Состояние интервального таймера"
-            setShowBadge(false)
+    private fun publishAll() {
+        val now = SystemClock.elapsedRealtime()
+        sessions.toMap().forEach { (gid, s) ->
+            TimerStateHolder.publishSnapshot(gid, s.snapshot(now), now, AudioEngine.droppedRingsCount.value)
         }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-    }
-
-    private fun startAsForeground() {
-        val notif = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-        } else {
-            startForeground(NOTIFICATION_ID, notif)
-        }
-    }
-
-    private fun buildNotification(): Notification {
-        val state = session.state
-        val content = buildString {
-            append(if (state == TimerState.RUNNING) "Идет" else "Пауза")
-            val cd = session.countdownToAutoStopMs()
-            if (cd != null) {
-                append(" · До авто-остановки: ").append(TimerSession.formatHms(cd))
-            }
-            append(" · Следующий звук: ").append(session.nextSoundDescription())
-            val dropped = AudioEngine.droppedRingsCount.value
-            if (dropped > 0) {
-                append(" · Часть сигналов пропущена (много звучит одновременно)")
-            }
-        }
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_timer)
-            .setContentTitle("Timer Sound")
-            .setContentText(content)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setContentIntent(openAppPendingIntent())
-        if (state == TimerState.RUNNING) {
-            builder.addAction(0, "Пауза", commandPendingIntent(ACTION_PAUSE, 1))
-        } else if (state == TimerState.PAUSED) {
-            builder.addAction(0, "Продолжить", commandPendingIntent(ACTION_RESUME, 2))
-        }
-        builder.addAction(0, "Стоп", commandPendingIntent(ACTION_STOP, 3))
-        return builder.build()
     }
 
     private fun showCompletedNotification() {
@@ -512,7 +461,7 @@ class TimerSoundService : Service() {
         getSystemService(NotificationManager::class.java).notify(COMPLETED_NOTIFICATION_ID, n)
     }
 
-    /** А3: устройство критически греется — предлагаем приостановить сессию. */
+    /** А3: устройство критически греется — предлагаем приостановить всё. */
     private fun showThermalNotification() {
         val text = "Устройство перегревается — рассмотрите паузу таймера."
         val n = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -523,13 +472,48 @@ class TimerSoundService : Service() {
             .setAutoCancel(true)
             .setContentIntent(openAppPendingIntent())
             .setWhen(System.currentTimeMillis())
-            .addAction(0, "Пауза", commandPendingIntent(ACTION_PAUSE, 4))
+            .addAction(0, "Пауза всех", commandPendingIntent(ACTION_PAUSE_ALL, 4, -1))
             .build()
         getSystemService(NotificationManager::class.java).notify(THERMAL_NOTIFICATION_ID, n)
     }
 
+    /** Агрегат: «N групп активно; ближайшее: …». */
+    private fun buildNotification(): Notification {
+        val now = SystemClock.elapsedRealtime()
+        val active = sessions.toMap().filter { it.value.isActive }
+        val nearest = active.mapNotNull { (gid, s) ->
+            s.snapshot(now).untilNextMs?.let { gid to it }
+        }.minByOrNull { it.second }
+        val content = buildString {
+            append("${active.size} групп активно")
+            if (nearest != null) {
+                append(" · ближайшее: группа ${nearest.first} через ${TimerSession.formatHms(nearest.second)}")
+            }
+            val dropped = AudioEngine.droppedRingsCount.value
+            if (dropped > 0) append(" · Часть сигналов пропущена")
+        }
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_timer)
+            .setContentTitle("Timer Sound")
+            .setContentText(content)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(openAppPendingIntent())
+        val firstRunning = active.entries.firstOrNull { it.value.isRunning }?.key
+        val firstPaused = active.entries.firstOrNull { it.value.state == TimerState.PAUSED }?.key
+        if (firstRunning != null) {
+            builder.addAction(0, "Пауза всех", commandPendingIntent(ACTION_PAUSE_ALL, 1, -1))
+        }
+        if (firstPaused != null) {
+            builder.addAction(0, "Продолжить ${firstPaused}", commandPendingIntent(ACTION_RESUME, 2, firstPaused))
+        }
+        builder.addAction(0, "Стоп всех", commandPendingIntent(ACTION_STOP_ALL, 3, -1))
+        return builder.build()
+    }
+
     private fun refreshNotification() {
-        if (session.isActive) {
+        if (sessions.values.any { it.isActive }) {
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification())
         }
     }
@@ -544,25 +528,11 @@ class TimerSoundService : Service() {
         )
     }
 
-    private fun commandPendingIntent(action: String, requestCode: Int): PendingIntent =
+    private fun commandPendingIntent(action: String, requestCode: Int, groupId: Int): PendingIntent =
         PendingIntent.getService(
-            this, requestCode, commandIntent(this, action),
+            this, requestCode, commandIntent(this, action, groupId),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-
-    // ------------------------------------------------------------------ UI snapshot
-
-    private fun publishUiSnapshot(stateOverride: TimerState? = null) {
-        val now = SystemClock.elapsedRealtime()
-        TimerStateHolder.set(
-            TimerStateHolder.Ui(
-                state = stateOverride ?: session.state,
-                nextSound = session.nextSoundDescription(now),
-                autoStop = session.countdownToAutoStopMs(now)?.let { TimerSession.formatHms(it) } ?: "",
-                droppedRingsCount = AudioEngine.droppedRingsCount.value,
-            )
-        )
-    }
 
     // ------------------------------------------------------------------ wake lock / media session
 
@@ -651,11 +621,17 @@ class TimerSoundService : Service() {
     companion object {
         private const val TAG = "TimerSound"
         const val ACTION_START = "com.timersound.intent.START"
+        const val ACTION_AUTO_START = "com.timersound.intent.AUTO_START"
         const val ACTION_PAUSE = "com.timersound.intent.PAUSE"
         const val ACTION_RESUME = "com.timersound.intent.RESUME"
         const val ACTION_STOP = "com.timersound.intent.STOP"
         const val ACTION_RESET = "com.timersound.intent.RESET"
+        const val ACTION_RESTART = "com.timersound.intent.RESTART"
+        const val ACTION_PAUSE_ALL = "com.timersound.intent.PAUSE_ALL"
+        const val ACTION_STOP_ALL = "com.timersound.intent.STOP_ALL"
         const val ACTION_TICK = "com.timersound.intent.TICK"
+        const val EXTRA_GROUP_ID = "extra_group_id"
+        const val EXTRA_PLAN_ANCHOR = "extra_plan_anchor"
         private const val ALARM_TICK_REQUEST_CODE = 4001
 
         /** Минимум, который последнее срабатывание должно отзвучать перед teardown. */
@@ -672,7 +648,12 @@ class TimerSoundService : Service() {
         const val THERMAL_NOTIFICATION_ID = 1003
         const val CHANNEL_ID = "timer_running"
 
-        fun commandIntent(context: Context, action: String): Intent =
+        fun commandIntent(context: Context, action: String, groupId: Int = -1): Intent =
             Intent(context, TimerSoundService::class.java).setAction(action)
+                .putExtra(EXTRA_GROUP_ID, groupId)
+
+        /** Request code уникален на группу и действие. */
+        fun requestCodeFor(action: String, groupId: Int): Int =
+            (action.hashCode() * 31 + groupId) and 0x0FFF_FFFF
     }
 }
