@@ -10,8 +10,11 @@ import com.timersound.AppLog
 import com.timersound.data.PreferencesRepository
 import com.timersound.timer.TimerSession
 import com.timersound.timer.WakeScheduler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 
 /**
  * Держит ОДИН ближайший PendingIntent: минимум из «следующее событие любой
@@ -31,24 +34,34 @@ object WakeSchedulerRearm {
     const val WAKE_REQUEST_CODE = 4100
     const val ACTION_WAKE = "com.timersound.intent.SCHEDULE_WAKE"
 
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     /**
-     * Пересчитать и переставить общий будильник. Читает группы синхронно
-     * (blocking): вызывается из очереди команд сервиса и из ресиверов.
+     * Пересчитать и переставить общий будильник. Неблокирующий: уходит
+     * в IO-скоп, onReceive держит goAsync() до конца работы.
+     * Возвращает необязательно: для тестов есть [rearmBlocking].
      */
     fun rearm(context: Context) {
+        val appContext = context.applicationContext
+        scope.launch {
+            runCatching { rearmBlocking(appContext) }
+        }
+    }
+
+    /** Синхронная версия для очереди команд сервиса и тестов. */
+    suspend fun rearmBlocking(context: Context) {
         val manager = runCatching {
             context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         }.getOrNull() ?: return
         val prefs = PreferencesRepository(context)
-        val (sessionNext, autoWalls, autoGroups) = runBlocking {
-            val app = prefs.appConfig.first()
-            val nowWall = System.currentTimeMillis()
-            val autos = app.groups.mapNotNull { g ->
-                WakeScheduler.nextAutoStartWall(g, nowWall)?.let { it to g.id }
-            }
-            val sess = TimerStateHolder.groups.value.values.mapNotNull { it.nextFireElapsedMs }
-            Triple(sess, autos.map { it.first }, autos.toMap())
+        val app = prefs.appConfig.first()
+        val nowWallRead = System.currentTimeMillis()
+        val autos = app.groups.mapNotNull { g ->
+            WakeScheduler.nextAutoStartWall(g, nowWallRead)?.let { it to g.id }
         }
+        val sessionNext = TimerStateHolder.groups.value.values.mapNotNull { it.nextFireElapsedMs }
+        val autoWalls = autos.map { it.first }
+        val autoGroups = autos.toMap()
         val nowElapsed = SystemClock.elapsedRealtime()
         val nowWall = System.currentTimeMillis()
         val wake = WakeScheduler.nextWakeUp(sessionNext, autoWalls, nowElapsed, nowWall)
@@ -60,7 +73,6 @@ object WakeSchedulerRearm {
             return
         }
         val triggerWall = nowWall + (nextElapsed - nowElapsed).coerceAtLeast(1_000L)
-        // Якорь планового автозапуска: какая группа ближе всего.
         val anchorGroup = autoWalls.minOrNull()?.let { w ->
             autoGroups.entries.firstOrNull { it.key == w }?.value
         }

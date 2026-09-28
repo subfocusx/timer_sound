@@ -51,7 +51,7 @@ import com.timersound.timer.TimerState
 class TimerSoundService : Service() {
 
     private data class QueuedCommand(val kind: Command, val groupId: Int = -1)
-    private enum class Command { START, PAUSE, RESUME, STOP, RESET, TICK, PAUSE_ALL, STOP_ALL, AUTO_START }
+    private enum class Command { START, PAUSE, RESUME, STOP, RESET, RESTART, TICK, PAUSE_ALL, STOP_ALL, AUTO_START }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
     private val commands = Channel<QueuedCommand>(Channel.UNLIMITED)
@@ -65,8 +65,6 @@ class TimerSoundService : Service() {
     private var tickJob: Job? = null
     /** Флаг fade-in глобальный (fadeIn — поле AppConfig). */
     private var fadeInEnabled = false
-    private val activeGroupIds: MutableSet<Int>
-        get() = sessions.keys
 
     override fun onCreate() {
         super.onCreate()
@@ -118,9 +116,7 @@ class TimerSoundService : Service() {
             ACTION_RESUME -> commands.trySend(QueuedCommand(Command.RESUME, gid))
             ACTION_STOP -> commands.trySend(QueuedCommand(Command.STOP, gid))
             ACTION_RESET -> commands.trySend(QueuedCommand(Command.RESET, gid))
-            ACTION_RESTART -> commands.trySend(QueuedCommand(Command.STOP, gid)).also {
-                commands.trySend(QueuedCommand(Command.START, gid))
-            }
+            ACTION_RESTART -> commands.trySend(QueuedCommand(Command.RESTART, gid))
             ACTION_PAUSE_ALL -> commands.trySend(QueuedCommand(Command.PAUSE_ALL))
             ACTION_STOP_ALL -> commands.trySend(QueuedCommand(Command.STOP_ALL))
             ACTION_TICK -> commands.trySend(QueuedCommand(Command.TICK))
@@ -153,6 +149,7 @@ class TimerSoundService : Service() {
             Command.RESUME -> handleResume(cmd.groupId)
             Command.STOP -> handleStop(cmd.groupId, completed = false)
             Command.RESET -> handleReset(cmd.groupId)
+            Command.RESTART -> handleRestart(cmd.groupId)
             Command.TICK -> onAlarmTick()
             Command.PAUSE_ALL -> handlePauseAll()
             Command.STOP_ALL -> handleStopAll()

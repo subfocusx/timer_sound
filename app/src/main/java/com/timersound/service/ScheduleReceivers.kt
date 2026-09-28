@@ -19,15 +19,17 @@ class ScheduleWakeReceiver : BroadcastReceiver() {
             TimerSoundService.commandIntent(context, TimerSoundService.ACTION_AUTO_START, groupId)
                 .putExtra(
                     TimerSoundService.EXTRA_PLAN_ANCHOR,
-                    intent.getLongExtra(TimerSoundService.EXTRA_PLAN_ANCHOR, -1L).takeIf { it >= 0 }
+                    intent?.getLongExtra(TimerSoundService.EXTRA_PLAN_ANCHOR, -1L)
+                        ?.takeIf { it >= 0 }
                         ?: System.currentTimeMillis(),
                 )
         } else {
             TimerSoundService.commandIntent(context, TimerSoundService.ACTION_TICK, -1)
         }
         runCatching { ContextCompat.startForegroundService(context, svc) }
-        // Перевооружаемся на следующее событие.
-        runCatching { WakeSchedulerRearm.rearm(context) }
+        // Перевооружаемся на следующее событие; goAsync держит ресивер до конца IO-работы.
+        val pending = goAsync()
+        runCatching { WakeSchedulerRearm.rearm(context) }.also { pending.finish() }
     }
 }
 
@@ -45,7 +47,8 @@ class ScheduleBootReceiver : BroadcastReceiver() {
             Intent.ACTION_LOCALE_CHANGED,
             -> {
                 AppLog.i("ScheduleBootReceiver: ${intent.action}, rearm")
-                runCatching { WakeSchedulerRearm.rearm(context) }
+                val pending = goAsync()
+                runCatching { WakeSchedulerRearm.rearm(context) }.also { pending.finish() }
             }
         }
     }

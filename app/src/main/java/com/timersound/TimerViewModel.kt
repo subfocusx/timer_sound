@@ -183,6 +183,7 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
     // ------------------------------------------------------------------ groups CRUD
 
+    /** null — пустая; иначе индекс в GroupPresets.all()/presetNames() (0=пустая, 1=«Подъём», …). */
     fun createGroup(fromPreset: Int? = null) {
         val cur = _app.value
         if (cur.groups.size >= GroupLimits.MAX_GROUPS) {

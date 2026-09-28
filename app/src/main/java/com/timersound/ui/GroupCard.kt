@@ -67,7 +67,6 @@ fun GroupCard(
     val locked = state == TimerState.RUNNING || state == TimerState.PAUSED
     val groupConflicts = conflicts.filter { it.groupA == group.id || it.groupB == group.id }
     val autoMin = group.autoStartMinutes()
-    var showMenu by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth().testTag("group_card_${group.id}"),
@@ -167,9 +166,6 @@ fun GroupCard(
                         Icon(Icons.Default.Delete, contentDescription = "Удалить")
                     }
                 }
-            }
-            if (showMenu) {
-                showMenu = false
             }
         }
     }

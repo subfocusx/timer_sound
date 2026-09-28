@@ -229,9 +229,11 @@ fun App(vm: TimerViewModel = viewModel()) {
 
     if (showPresetPicker) {
         PresetPickerDialog(
-            names = listOf("Пустая") + GroupPresets.presetNames().drop(1),
+            // presetNames()[i] соответствует GroupPresets.all(id, base)[i]:
+            // 0 = «Пустая» → createGroup(null), остальные → createGroup(i).
+            names = GroupPresets.presetNames(),
             onPick = { i ->
-                vm.createGroup(if (i == 0) null else i - 1 + 0)
+                vm.createGroup(if (i == 0) null else i)
                 showPresetPicker = false
             },
             onDismiss = { showPresetPicker = false },
