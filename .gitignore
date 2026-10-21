@@ -8,6 +8,9 @@ local.properties
 # Локально распакованная раздача Gradle (164 МБ)
 gradle-9.7.1/
 
+# Локальный GRADLE_USER_HOME (кэш зависимостей, раздача Gradle)
+.gradle-home-test/
+
 # Gradle
 .gradle/
 build/

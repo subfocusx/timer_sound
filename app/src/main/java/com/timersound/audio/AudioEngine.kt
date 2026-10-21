@@ -62,21 +62,21 @@ object AudioEngine {
     /**
      * Ring channel signal once (interval fire). If the channel is still sounding
      * from the previous interval - the ringtone is stopped and re-created.
+     *
+     * @return true, если сигнал запущен; false — файл недоступен/битый (звонок пропускается).
      */
-    fun play(context: Context, alarm: AlarmConfig, fadeIn: Boolean = false, groupId: Int = 0) {
-        playKeyed(context, RingKey(groupId, alarm.id), alarm, fadeIn)
+    fun play(context: Context, alarm: AlarmConfig, fadeIn: Boolean = false, groupId: Int = 0): Boolean {
+        return playKeyed(context, RingKey(groupId, alarm.id), alarm, fadeIn)
     }
 
     /** Ключ (groupId, alarmId): стоп одной группы не глушит звук другой. */
-    fun playKeyed(context: Context, key: RingKey, alarm: AlarmConfig, fadeIn: Boolean = false) {
-        val ringRef: Ringtone?
-        val targetVolume: Float
-        synchronized(lock) {
+    fun playKeyed(context: Context, key: RingKey, alarm: AlarmConfig, fadeIn: Boolean = false): Boolean {
+        val handle: PlayHandle? = synchronized(lock) {
             try {
                 val ring = createRingtone(context, alarm)
                 if (ring == null) {
                     Log.w(TAG, "AudioEngine.play: NO ringtone key=$key uri=${alarm.fileUri} - aborted")
-                    return
+                    return@synchronized null
                 }
                 players.remove(key)?.let { runCatching { it.stop() } }
                 val dropped = droppedFor(players.size, incomingNewChannel = true)
@@ -86,29 +86,34 @@ object AudioEngine {
                     players.remove(oldestId)?.let { runCatching { it.stop() } }
                 }
                 if (dropped > 0) _droppedRingsCount.value += dropped
-                targetVolume = alarm.volumePercent / 100f
+                val targetVolume = alarm.volumePercent / 100f
                 ring.setVolume(if (fadeIn) 0f else targetVolume)
                 players[key] = ring
                 Log.i(TAG, "AudioEngine.play: calling ring.play() key=$key uri=${alarm.fileUri}")
                 ring.play()
                 Log.i(TAG, "AudioEngine.play: returned OK key=$key")
-                ringRef = ring
+                PlayHandle(ring, targetVolume)
             } catch (e: Exception) {
                 Log.e(TAG, "AudioEngine.play: EXCEPTION key=$key uri=${alarm.fileUri}: ${e}", e)
-                return
+                null
             }
         }
-        if (fadeIn && ringRef != null) {
+        val started = handle ?: return false
+        if (fadeIn) {
             fadeScope.launch {
                 repeat(FADE_IN_STEPS) { i ->
                     delay(FADE_IN_STEP_MS)
-                    val stillCurrent = synchronized(lock) { players[key] === ringRef }
+                    val stillCurrent = synchronized(lock) { players[key] === started.ring }
                     if (!stillCurrent) return@launch
-                    runCatching { ringRef.setVolume(targetVolume * (i + 1) / FADE_IN_STEPS) }
+                    runCatching { started.ring.setVolume(started.volume * (i + 1) / FADE_IN_STEPS) }
                 }
             }
         }
+        return true
     }
+
+    /** Запущенный звонок и его целевая громкость (для плавного нарастания). */
+    private data class PlayHandle(val ring: Ringtone, val volume: Float)
 
     /** One-shot preview of a channel signal (not tied to the timer session). */
     fun preview(context: Context, alarm: AlarmConfig, groupId: Int = 0) {

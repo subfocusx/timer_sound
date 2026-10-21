@@ -31,6 +31,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.timersound.TimerViewModel
 import com.timersound.model.AlarmGroup
 import com.timersound.model.Defaults
+import com.timersound.model.SoundSourceType
 import com.timersound.model.Weekdays
 import com.timersound.service.TimerStateHolder
 import com.timersound.timer.ScheduleConflicts
@@ -54,12 +55,27 @@ fun GroupDetailScreen(
     val locked = state == TimerState.RUNNING || state == TimerState.PAUSED
     var expandedAlarmId by remember(group.id) { mutableStateOf<Int?>(null) }
     var pendingAlarmId by remember(group.id) { mutableStateOf<Int?>(null) }
+    // Отдельный pending-id для папки: выбор файла и выбор папки не должны путаться.
+    var pendingFolderAlarmId by remember(group.id) { mutableStateOf<Int?>(null) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var deleteTargetId by remember { mutableStateOf<Int?>(null) }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { pendingAlarmId?.let { id -> vm.onFilePicked(group.id, id, uri) } }
         pendingAlarmId = null
+    }
+
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        val targetId = pendingFolderAlarmId
+        pendingFolderAlarmId = null
+        uri?.let { treeUri ->
+            targetId?.let { id ->
+                // Источник переключаем ДО сохранения папки: смена типа источника
+                // может обнулить её, и тогда выбранное дерево потерялось бы.
+                vm.setSourceType(group.id, id, SoundSourceType.FOLDER)
+                vm.onFolderPicked(group.id, id, treeUri)
+            }
+        }
     }
 
     val overlapIds = remember(group) {
@@ -121,6 +137,7 @@ fun GroupDetailScreen(
                     },
                     onDelete = { deleteTargetId = alarm.id; showDeleteDialog = true },
                     onPickFile = { pendingAlarmId = alarm.id; filePicker.launch(arrayOf("audio/*")) },
+                    onPickFolder = { pendingFolderAlarmId = alarm.id; folderPicker.launch(null) },
                     hasOverlap = alarm.id in overlapIds,
                 )
             }

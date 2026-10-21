@@ -89,9 +89,10 @@ class PreferencesRepositoryMigrationTest {
 
         repo.ensureMigrated()
 
-        // ensureMigrated доводит до v3: плоский конфиг — группа «Основная».
+        // ensureMigrated доводит до v4 (v3: плоский конфиг — группа «Основная»;
+        // v4: добавлены поля источника звука и режима громкости).
         val raw = context.dataStore.data.first()
-        assertEquals(3, raw[schemaVersionKey])
+        assertEquals(4, raw[schemaVersionKey])
         assertEquals(1, raw[intPreferencesKey("next_group_id")])
         assertTrue(raw[stringPreferencesKey("groups_json")]?.isNotEmpty() == true)
         // Старые ключи удалены в той же транзакции.
@@ -132,7 +133,7 @@ class PreferencesRepositoryMigrationTest {
         repo.ensureMigrated() // повторный вызов не должен ничего перезаписать
 
         assertEquals(edited, repo.appConfig.first())
-        assertEquals(3, context.dataStore.data.first()[schemaVersionKey])
+        assertEquals(4, context.dataStore.data.first()[schemaVersionKey])
     }
 
     @Test
@@ -149,7 +150,7 @@ class PreferencesRepositoryMigrationTest {
         assertTrue(config.alarms[0].enabled)
         assertTrue(config.alarms.drop(1).all { it.fileUri.isEmpty() && !it.enabled })
         assertEquals("Основная", repo.appConfig.first().groups.single().name)
-        assertEquals(3, context.dataStore.data.first()[schemaVersionKey])
+        assertEquals(4, context.dataStore.data.first()[schemaVersionKey])
     }
 
     @Test

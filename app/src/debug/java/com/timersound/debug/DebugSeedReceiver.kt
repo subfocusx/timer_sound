@@ -8,7 +8,10 @@ import com.timersound.model.AlarmConfig
 import com.timersound.model.AlarmGroup
 import com.timersound.model.AppConfig
 import com.timersound.model.Defaults
+import com.timersound.model.FolderPlayMode
 import com.timersound.model.SceneMode
+import com.timersound.model.SoundSourceType
+import com.timersound.model.VolumeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,17 +53,32 @@ class DebugSeedReceiver : BroadcastReceiver() {
             return
         }
         val spec = intent?.getStringExtra("spec") ?: "once+1"
+        // Доп. параметры папки (для ручных тестов на устройстве без UI):
+        //   --es folderUri content://.../tree/...  — будильник-папка в сидированной группе
+        //   --es folderMode sequential|random     — режим папки (по умолчанию random)
+        //   --ei volMin 50 --ei volMax 80         — диапазон громкости (плавающая)
+        val folderUri = intent?.getStringExtra("folderUri")
+        val folderMode = intent?.getStringExtra("folderMode")
+        val volMin = intent?.getIntExtra("volMin", -1) ?: -1
+        val volMax = intent?.getIntExtra("volMax", -1) ?: -1
         val pending = goAsync()
         scope.launch {
             try {
-                seed(appCtx, spec)
+                seed(appCtx, spec, folderUri, folderMode, volMin, volMax)
             } finally {
                 pending.finish()
             }
         }
     }
 
-    private suspend fun seed(context: Context, spec: String) {
+    private suspend fun seed(
+        context: Context,
+        spec: String,
+        folderUri: String? = null,
+        folderMode: String? = null,
+        volMin: Int = -1,
+        volMax: Int = -1,
+    ) {
         val prefs = PreferencesRepository(context)
         prefs.ensureMigrated()
         val parts = spec.split(",").map { it.trim() }
@@ -95,7 +113,7 @@ class DebugSeedReceiver : BroadcastReceiver() {
         val group = AlarmGroup(
             id = 900,
             name = "TEST $spec",
-            alarms = alarms,
+            alarms = alarms + listOfNotNull(folderAlarm(9000, folderUri, folderMode, volMin, volMax)),
             enabled = true,
             weekdays = if (manual) 0 else (1 shl (day - 1)),
         )
@@ -114,6 +132,42 @@ class DebugSeedReceiver : BroadcastReceiver() {
             mode = mode, intervalMs = Defaults.DEFAULT_INTERVAL_MS,
             startMinutes = startMin, volumePercent = 80, enabled = true,
         )
+
+    /**
+     * Будильник-папка для ручных тестов: кэш файлов пустой — сервис пересканирует
+     * папку при старте группы (и покажет «доступ потерян», если прав нет).
+     */
+    private fun folderAlarm(
+        id: Int,
+        folderUri: String?,
+        folderMode: String?,
+        volMin: Int,
+        volMax: Int,
+    ): AlarmConfig? {
+        if (folderUri.isNullOrEmpty()) return null
+        val mode = if (folderMode == "sequential") {
+            FolderPlayMode.SEQUENTIAL
+        } else {
+            FolderPlayMode.RANDOM_NOREPEAT
+        }
+        val ranged = volMin in 0..100 && volMax in 0..100
+        return AlarmConfig(
+            id = id,
+            name = "FOLDER",
+            fileUri = "",
+            mode = SceneMode.REPEAT,
+            intervalMs = 15_000L,
+            volumePercent = 80,
+            enabled = true,
+            sourceType = SoundSourceType.FOLDER,
+            folderUri = folderUri,
+            folderName = folderUri.substringAfterLast('/').substringAfterLast(':'),
+            folderPlayMode = mode,
+            volumeMode = if (ranged) VolumeMode.RANDOM_RANGE else VolumeMode.FIXED,
+            volumeMin = if (ranged) minOf(volMin, volMax) else 0,
+            volumeMax = if (ranged) maxOf(volMin, volMax) else 100,
+        )
+    }
 
     private fun todayIso(): Int {
         val cal = java.util.Calendar.getInstance()

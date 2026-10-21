@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -31,8 +32,17 @@ import kotlinx.coroutines.launch
 import com.timersound.R
 import com.timersound.AppLog
 import com.timersound.audio.AudioEngine
+import com.timersound.audio.FolderScanResult
+import com.timersound.audio.FolderScanner
+import com.timersound.audio.FolderSoundPicker
 import com.timersound.audio.PreviewPlayer
+import com.timersound.audio.SoundRandom
+import com.timersound.audio.SoundVolume
+import com.timersound.data.FolderStatePatch
 import com.timersound.data.PreferencesRepository
+import com.timersound.model.AlarmConfig
+import com.timersound.model.SoundSourceType
+import com.timersound.model.TimerConfig
 import com.timersound.timer.TimerSession
 import com.timersound.timer.TickPolicy
 import com.timersound.timer.TimerState
@@ -54,6 +64,8 @@ class TimerSoundService : Service() {
     private enum class Command { START, PAUSE, RESUME, STOP, RESET, RESTART, TICK, PAUSE_ALL, STOP_ALL, AUTO_START }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
+    /** Отдельный поток для фоновых записей (курсоры папок) — не блокирует очередь команд. */
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val commands = Channel<QueuedCommand>(Channel.UNLIMITED)
     /** Один TimerSession на каждую активную группу. */
     private val sessions = mutableMapOf<Int, TimerSession>()
@@ -65,6 +77,19 @@ class TimerSoundService : Service() {
     private var tickJob: Job? = null
     /** Флаг fade-in глобальный (fadeIn — поле AppConfig). */
     private var fadeInEnabled = false
+
+    /**
+     * Курсор «последний сыгранный файл папки» по ключу (groupId, alarmId).
+     * Живёт в памяти сервиса (переживает тики без записи в DataStore), сохраняется
+     * в конфиг отложенным патчем — без перезапуска сессии и без второго таймера.
+     */
+    private val folderCursors = mutableMapOf<AudioEngine.RingKey, Int>()
+
+    /** Счётчик подряд идущих неудачных воспроизведений (битый/удалённый файл). */
+    private val playErrorStreak = mutableMapOf<AudioEngine.RingKey, Int>()
+
+    /** Отложенное сохранение курсоров папок в DataStore. */
+    private var cursorSaveJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -164,13 +189,20 @@ class TimerSoundService : Service() {
         fadeInEnabled = app.fadeInEnabled
         val group = app.groups.firstOrNull { it.id == groupId } ?: return
         val runConfig = group.toRunConfig(fadeInEnabled)
-        if (runConfig.playableAlarms().isEmpty()) return
+        // Папки: проверка доступа + пересканирование (файлы могли добавиться/удалиться).
+        val prepared = prepareFolderAlarms(groupId, runConfig)
+        if (prepared.playableAlarms().isEmpty()) return
         AudioEngine.stopGroup(groupId)
         PreviewPlayer.stop()
         val session = sessionOf(groupId)
-        session.start(runConfig, planAnchorWallMs = planAnchorWallMs)
+        // Курсор папки стартует с сохранённого lastFolderIndex (порядок продолжается).
+        prepared.alarms.filter { it.isFolderSource && it.hasFolder }.forEach { a ->
+            folderCursors[AudioEngine.RingKey(groupId, a.id)] = a.lastFolderIndex
+        }
+        playErrorStreak.keys.removeIf { it.groupId == groupId }
+        session.start(prepared, planAnchorWallMs = planAnchorWallMs)
         prefs.setActiveGroups(sessions.keys.filter { sessions[it]?.isActive == true }.toSet())
-        Log.i(TAG, "handleStart: group=$groupId playable=${runConfig.playableAlarms().size}")
+        Log.i(TAG, "handleStart: group=$groupId playable=${prepared.playableAlarms().size}")
         acquireWakeLock()
         setupMediaSession(playing = true)
         startAsForeground()
@@ -182,6 +214,69 @@ class TimerSoundService : Service() {
         startTickLoop()
         scheduleExactAlarm()
         rearmAsync()
+    }
+
+    /**
+     * Подготовка будильников-папок перед стартом сессии:
+     *  - пересканирование папки (файлы могли измениться);
+     *  - проверка persistable-доступа: при отзыве доступа будильник выпадает из
+     *    сессии (остальные будильники группы продолжают работать), а в конфиге
+     *    фиксируется флаг «доступ потерян» — UI покажет понятное сообщение.
+     *
+     * Возвращает конфиг запуска с обновлёнными данными папок.
+     */
+    private suspend fun prepareFolderAlarms(groupId: Int, config: TimerConfig): TimerConfig {
+        val hasFolders = config.alarms.any { it.isFolderSource && it.hasFolder }
+        if (!hasFolders) return config
+        val patches = mutableListOf<FolderStatePatch>()
+        val updated: List<AlarmConfig> = config.alarms.map { alarm ->
+            if (!alarm.isFolderSource || !alarm.hasFolder) return@map alarm
+                when (val scan = FolderScanner.scan(applicationContext, Uri.parse(alarm.folderUri))) {
+                is FolderScanResult.Ok -> {
+                    val files = scan.files
+                    if (files != alarm.folderFiles) {
+                        patches.add(
+                            FolderStatePatch(
+                                alarmId = alarm.id,
+                                folderFiles = files,
+                                folderAccessLost = false,
+                            ),
+                        )
+                    } else if (alarm.folderAccessLost) {
+                        patches.add(
+                            FolderStatePatch(alarmId = alarm.id, folderAccessLost = false),
+                        )
+                    }
+                    alarm.copy(
+                        folderFiles = files,
+                        folderAccessLost = false,
+                        lastFolderIndex = alarm.lastFolderIndex.coerceIn(-1, files.size - 1),
+                    )
+                }
+                is FolderScanResult.AccessLost -> {
+                    AppLog.w(
+                        "TimerSoundService: доступ к папке потерян, ch=${alarm.id} uri=${alarm.folderUri}",
+                    )
+                    if (alarm.folderAccessLost && alarm.folderFiles.isEmpty()) {
+                        alarm
+                    } else {
+                        patches.add(
+                            FolderStatePatch(
+                                alarmId = alarm.id,
+                                folderFiles = emptyList(),
+                                folderAccessLost = true,
+                            ),
+                        )
+                        alarm.copy(folderFiles = emptyList(), folderAccessLost = true)
+                    }
+                }
+            }
+        }
+        if (patches.isNotEmpty()) {
+            runCatching { prefs.patchFolderState(groupId, patches) }
+                .onFailure { AppLog.e("TimerSoundService: не удалось сохранить состояние папок: ${it.message}") }
+        }
+        return config.copy(alarms = updated)
     }
 
     /** Автозапуск по расписанию: пропуск, если группа уже RUNNING/PAUSED. */
@@ -254,6 +349,9 @@ class TimerSoundService : Service() {
         AudioEngine.stopGroup(groupId)
         TimerStateHolder.removeGroup(groupId)
         sessions.remove(groupId)
+        // Курсор папки сохраняем — последовательный порядок продолжится в следующей сессии.
+        persistFolderCursors()
+        playErrorStreak.keys.removeIf { it.groupId == groupId }
         prefs.setActiveGroups(sessions.keys.filter { sessions[it]?.isActive == true }.toSet())
     }
 
@@ -379,10 +477,117 @@ class TimerSoundService : Service() {
     private fun handleTickGroup(groupId: Int, nowElapsedMs: Long = SystemClock.elapsedRealtime()): Boolean {
         val session = sessions[groupId] ?: return false
         val completed = session.tick(nowElapsedMs) { channel ->
-            AudioEngine.play(applicationContext, channel, fadeIn = fadeInEnabled, groupId = groupId)
+            playChannel(groupId, channel)
         }
         publishGroup(groupId)
         return completed || session.state == TimerState.COMPLETED
+    }
+
+    /**
+     * Одно срабатывание канала: резолв источника (файл/папка) и громкости, затем звук.
+     *
+     * Один тик = один play на будильник: соседние будильники не делят плеер
+     * (ключ звука — (groupId, alarmId)), фаза интервалов не сдвигается.
+     */
+    private fun playChannel(groupId: Int, alarm: AlarmConfig) {
+        val key = AudioEngine.RingKey(groupId, alarm.id)
+        val streak = playErrorStreak[key] ?: 0
+        if (streak >= MAX_CONSECUTIVE_PLAY_ERRORS) {
+            // Битый файл: не крутимся на нём — будильник пропускается до конца сессии.
+            AppLog.w(
+                "TimerSoundService: ch=${alarm.id} пропущен ($streak ошибок подряд), " +
+                    "источник=${alarm.sourceType}",
+            )
+            return
+        }
+        var candidate = alarm
+        var attempt = 0
+        while (attempt < MAX_PLAY_ATTEMPTS) {
+            val resolved = resolveForPlay(groupId, candidate) ?: return
+            val ok = AudioEngine.play(
+                applicationContext,
+                resolved.alarm,
+                fadeIn = fadeInEnabled,
+                groupId = groupId,
+            )
+            if (ok) {
+                playErrorStreak.remove(key)
+                return
+            }
+            attempt++
+            if (!candidate.isFolderSource) break
+            // Битый файл в папке не должен блокировать будильник: пробуем следующий.
+            val badIndex = resolved.folderIndex
+            val rest = candidate.folderFiles.filterIndexed { index, _ -> index != badIndex }
+            if (rest.isEmpty()) break
+            candidate = candidate.copy(folderFiles = rest)
+        }
+        val newStreak = (playErrorStreak[key] ?: 0) + 1
+        playErrorStreak[key] = newStreak
+        AppLog.w(
+            "TimerSoundService: ch=${alarm.id} не воспроизведён ($newStreak ошибок подряд), " +
+                "источник=${alarm.sourceType}",
+        )
+    }
+
+    /** Резолв источника и громкости для очередного срабатывания. */
+    private fun resolveForPlay(groupId: Int, alarm: AlarmConfig): ResolvedPlay? {
+        val volume = SoundVolume.resolveFor(alarm, SoundRandom.random)
+        if (!alarm.isFolderSource) {
+            return ResolvedPlay(alarm.copy(volumePercent = volume), -1)
+        }
+        val files = alarm.folderFiles
+        if (files.isEmpty()) {
+            AppLog.w("TimerSoundService: ch=${alarm.id} — папка пуста, сигнал пропущен")
+            return null
+        }
+        val key = AudioEngine.RingKey(groupId, alarm.id)
+        val cursor = folderCursors[key] ?: alarm.lastFolderIndex
+        val index = FolderSoundPicker.nextIndex(
+            size = files.size,
+            mode = alarm.folderPlayMode,
+            lastIndex = cursor,
+            random = SoundRandom.random,
+        )
+        if (index < 0) return null
+        folderCursors[key] = index
+        scheduleCursorSave()
+        val picked = files[index]
+        AppLog.i(
+            "TimerSoundService: папка ch=${alarm.id} idx=$index/${files.size} " +
+                "file=\"${picked.name}\" vol=$volume mode=${alarm.folderPlayMode}",
+        )
+        return ResolvedPlay(
+            alarm = alarm.copy(
+                sourceType = SoundSourceType.FILE,
+                fileUri = picked.uri,
+                fileName = picked.name,
+                volumePercent = volume,
+            ),
+            folderIndex = index,
+        )
+    }
+
+    /** Готовый к воспроизведению будильник + индекс выбранного файла папки (-1 — не папка). */
+    private data class ResolvedPlay(val alarm: AlarmConfig, val folderIndex: Int)
+
+    /** Отложенное сохранение курсоров папок: без записи в DataStore на каждом тике. */
+    private fun scheduleCursorSave() {
+        if (cursorSaveJob?.isActive == true) return
+        cursorSaveJob = ioScope.launch {
+            delay(CURSOR_SAVE_DEBOUNCE_MS)
+            persistFolderCursors()
+        }
+    }
+    private suspend fun persistFolderCursors() {
+        val byGroup = folderCursors.entries.groupBy { it.key.groupId }
+        for ((groupId, entries) in byGroup) {
+            val patches = entries.map { (key, index) ->
+                FolderStatePatch(alarmId = key.alarmId, lastFolderIndex = index)
+            }
+            runCatching { prefs.patchFolderState(groupId, patches) }
+                .onFailure { AppLog.e("TimerSoundService: не удалось сохранить курсор папки: ${it.message}") }
+        }
     }
 
     private suspend fun onAlarmTick() {
@@ -659,6 +864,7 @@ class TimerSoundService : Service() {
         }
         commands.close()
         scope.cancel()
+        ioScope.cancel()
         super.onDestroy()
     }
 
@@ -689,6 +895,12 @@ class TimerSoundService : Service() {
         private const val WAKE_LOCK_TIMEOUT_MS = 2 * 60_000L
         /** А2: как часто продлевать wake lock, пока сессия активна. */
         private const val WAKE_LOCK_RENEW_MS = 60_000L
+        /** Сколько попыток воспроизведения на один тик (битый файл в папке — пробуем следующий). */
+        private const val MAX_PLAY_ATTEMPTS = 3
+        /** После скольких ошибок подряд будильник перестаёт пытаться играть. */
+        private const val MAX_CONSECUTIVE_PLAY_ERRORS = 3
+        /** Пауза перед отложенным сохранением курсоров папок в DataStore, мс. */
+        private const val CURSOR_SAVE_DEBOUNCE_MS = 3_000L
         const val NOTIFICATION_ID = 1001
         const val COMPLETED_NOTIFICATION_ID = 1002
         const val THERMAL_NOTIFICATION_ID = 1003

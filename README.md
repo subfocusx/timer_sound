@@ -16,6 +16,14 @@ Kotlin + Jetpack Compose (Material 3) + Android Foreground Service.
   - свой интервал `ЧЧ:ММ:СС`, своя громкость 0–100 %, переключатель ВКЛ/ВЫКЛ;
   - режим сценария (Повтор / Один раз / N раз / Случайно) с режим-специфичными полями;
   - предпросмотр, замена и удаление файла; имя файла сохраняется (`DISPLAY_NAME`).
+- **Источник звука — на уровне будильника**: либо один файл, либо **папка со звуками**
+  (SAF-дерево, persistable-права). Один будильник = один источник, остальные будильники
+  группы не трогаются: папка и одиночный файл в соседних будильниках не конфликтуют.
+  Режимы папки: **по порядку** (1-й, 2-й, … после последнего — снова 1-й) и
+  **случайно без немедленного повтора** (при N > 1 файл не повторяется два раза подряд).
+  Сканируется только первый уровень папки, файлы сортируются по имени.
+- **Плавающая громкость** (на уровне будильника): фикс 0–100 % (как раньше) либо
+  **диапазон** min–max — каждое срабатывание играет на случайной громкости внутри диапазона.
 - **Первый запуск**: группа «Основная» с одним будильником — встроенным сигналом (`res/raw/beep.wav`).
 - **Пресеты** (в коде, не в хранилище, все со встроенным бипом): Пустая, Подъём (Пн–Пт),
   Помодоро, Таблетки, Разминка каждый час, Случайные проверки, Медитация.
@@ -44,8 +52,9 @@ Kotlin + Jetpack Compose (Material 3) + Android Foreground Service.
   («N групп активно; ближайшее: …») с кнопками «Пауза всех»/«Стоп всех»,
   частичный wakelock, MediaSession (обязательна на Android 15+).
 - **Тайминг — по реальному времени** (`SystemClock.elapsedRealtime()`).
-- **Настройки сохраняются** (DataStore, схема v3). Обновление со старой версии:
-  плоский список становится группой «Основная». Баннер «прервано системой» — по группам.
+- **Настройки сохраняются** (DataStore, схема v4). Обновление со старой версии:
+  плоский список становится группой «Основная» (v3), далее добавляются поля
+  источника звука и режима громкости (v4). Баннер «прервано системой» — по группам.
 - **Параллельное воспроизведение**: у каждого звука ключ `(groupId, alarmId)`,
   общий лимит `MAX_CONCURRENT_RINGS=10`. Стоп одной группы не глушит другую.
 
@@ -61,6 +70,36 @@ Kotlin + Jetpack Compose (Material 3) + Android Foreground Service.
 **Последнее срабатывание конечного режима доигрывает файл** (до `MAX_LAST_RING_MS` = 2 мин),
 затем teardown с проверкой epoch (перезапуск во время доигрывания не сносится).
 Авто-остановка по таймеру глушит всё немедленно.
+
+---
+
+## Источник звука: файл или папка
+
+Источник задаётся **на уровне будильника** (`AlarmConfig.sourceType`): `FILE` или `FOLDER`.
+Глобального переключателя нет — соседние будильники группы могут использовать разные
+источники и не мешают друг другу (ключ звука по-прежнему `(groupId, alarmId)`).
+
+| Что | Как |
+|---|---|
+| Выбор папки | Кнопка «Выбрать папку» под громкостью → системный пикер дерева (`OpenDocumentTree`) |
+| Права | `takePersistableUriPermission` на tree-uri — после перезапуска приложения папка остаётся доступна |
+| Сканирование | Только первый уровень, `audio/*` + расширения mp3/wav/ogg/m4a/aac/flac/mid/opus; сортировка по имени → стабильный порядок для режима «по порядку» |
+| Кэш | `folderFiles` (SAF-uri + имя) в конфиге будильника; пересканируется при старте группы |
+| Режим «Случайно» | Каждый тик — случайный файл, кроме только что игравшего (при N > 1) |
+| Режим «По порядку» | 1-й, 2-й, … после последнего — снова 1-й; позиция сохраняется между сессиями (`lastFolderIndex`) |
+| Пустая папка | Будильник не играбелен, старт блокируется с текстом причины («В папке нет аудиофайлов») |
+| Потерянный доступ | Проверка при старте группы и при перезапуске приложения: «Доступ потерян — выберите папку снова»; остальные будильники группы продолжают работать |
+| Битый файл | Срабатывание пропускается с записью в лог, следующий файл играет; после 3 ошибок подряд будильник не мучается (без зацикливания, без ANR) |
+
+Выбор файла из папки происходит **в момент срабатывания** (`TimerSoundService.resolveForPlay`):
+сессия не перезапускается, лишний таймер не создаётся, фаза интервалов не сдвигается.
+
+## Плавающая громкость
+
+`AlarmConfig.volumeMode` = `FIXED` (по умолчанию, поведение не изменилось) или `RANDOM_RANGE`.
+В диапазонном режиме каждый тик будильника получает **свою** громкость внутри `[volumeMin, volumeMax]`
+(инвариант `0 ≤ min ≤ max ≤ 100`, `min == max` ведёт себя как фикс). Случайность берётся
+из одного `Random` на процесс (`audio/SoundRandom`), а не создаётся на каждый тик.
 
 ---
 
@@ -85,9 +124,9 @@ COMPLETED --Заново/Сброс--> RUNNING/IDLE
 | Мультисессии | `service/TimerSoundService.kt` | `Map<groupId, TimerSession>`, одна очередь команд `limitedParallelism(1)`; команды START/PAUSE/RESUME/STOP/RESET/RESTART/PAUSE_ALL/STOP_ALL/AUTO_START; `stopSelf` только без активных сессий. |
 | Автозапуск | `service/WakeSchedulerRearm.kt`, `service/ScheduleReceivers.kt`, `timer/WakeScheduler.kt` | Один общий `setAlarmClock`: min(события сессий, автозапуски); якорь планового времени в intent (защита от «завтра»); rearm при BOOT/TIME_SET/TIMEZONE/MY_PACKAGE_REPLACED/мутациях. |
 | Движок | `timer/TimerSession.kt` (`snapshot`, `planAnchorWallMs`), `timer/SceneScheduler.kt` (+дни недели), `timer/ScheduleConflicts.kt` | Чистая математика расписаний; wall→elapsed; конфликты без Android. |
-| Модель | `model/AlarmGroup.kt` (+`Weekdays`), `model/AppConfig.kt`, `model/GroupPresets.kt`, `model/TimerConfig.kt`/`SceneMode.kt` | Группа → `toRunConfig(fadeIn)` («конфиг одного запуска» для движка без переделок). |
-| Звук | `audio/AudioEngine.kt` (`RingKey`), `audio/PreviewPlayer.kt` | По одному `Ringtone` на (группу, будильник); preview — ExoPlayer, один на процесс. |
-| Хранилище | `data/PreferencesRepository.kt`, `data/AlarmJson.kt` | DataStore + JSON (`groups_json`, схема v3, `ignoreUnknownKeys`); миграция v2→v3 одной транзакцией («Основная», старые ключи удаляются); битый JSON → лог и дефолт. |
+| Модель | `model/AlarmGroup.kt` (+`Weekdays`), `model/AppConfig.kt`, `model/GroupPresets.kt`, `model/TimerConfig.kt`/`SceneMode.kt`/`SoundSource.kt` | Группа → `toRunConfig(fadeIn)` («конфиг одного запуска» для движка без переделок). `SoundSource.kt` — источник звука (файл/папка), режим папки, режим громкости, запись файла папки. |
+| Звук | `audio/AudioEngine.kt` (`RingKey`), `audio/PreviewPlayer.kt`, `audio/FolderSoundPicker.kt`, `audio/FolderScanner.kt`, `audio/SoundVolume.kt` | По одному `Ringtone` на (группу, будильник); preview — ExoPlayer, один на процесс. `FolderSoundPicker` — выбор файла папки (чистая функция), `FolderScanner` — SAF-сканирование папки, `SoundVolume` — фикс/диапазон громкости. |
+| Хранилище | `data/PreferencesRepository.kt`, `data/AlarmJson.kt` | DataStore + JSON (`groups_json`, схема v4, `ignoreUnknownKeys`); миграции v2→v3 («Основная», старые ключи удаляются) и v3→v4 (источник звука и режим громкости) одной транзакцией; битый JSON → лог и дефолт. |
 
 Запуск FGS из `setAlarmClock` разрешён на Android 12+ (alarm-clock даёт окно для FGS).
 
@@ -110,6 +149,14 @@ Debug-сборка содержит `debug`-only сид групп из adb (в 
 `adb shell am broadcast -a com.timersound.debug.SEED -n com.timersound/.debug.DebugSeedReceiver --es spec 'once+2'`
 (spec: `once+N`, `interval+N`, `random`, `repeat`, `day=1..7`, `manual`;
 команды: `--es cmd start|stop|pause|resume|restart|reset --ei group <id>`).
+
+Сид будильника-папки (для ручных тестов без UI — нужен tree-uri выбранной папки):
+```bash
+adb shell am broadcast -a com.timersound.debug.SEED -n com.timersound/.debug.DebugSeedReceiver \
+  --es spec "repeat" --es folderUri "content://com.android.externalstorage.documents/tree/primary%3AMusic%2FAlarm" \
+  --es folderMode sequential --ei volMin 50 --ei volMax 80
+```
+(`folderMode`: `random` | `sequential`; `volMin`/`volMax` — диапазон громкости.)
 
 ## Разрешения
 

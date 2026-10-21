@@ -32,6 +32,7 @@ internal val Context.dataStore by preferencesDataStore(
 )
 
 private val alarmsJsonKey = stringPreferencesKey("alarms_json")
+/** Версия схемы хранилища. Сейчас 4: v3 — группы, v4 — папка-источник и режим громкости. */
 private val schemaVersionKey = intPreferencesKey("schema_version")
 private val nextAlarmIdKey = intPreferencesKey("next_alarm_id")
 private val autoStopKey = longPreferencesKey("auto_stop_ms")
@@ -45,6 +46,14 @@ private val activeGroupsKey = stringPreferencesKey("active_group_ids")
 
 /** Метка «системный запрос POST_NOTIFICATIONS уже показывали» — чтобы не спрашивать каждый запуск. */
 private val notificationAskedKey = booleanPreferencesKey("notification_permission_asked")
+
+/** Патч состояния папок будильников группы: меняет ТОЛЬКО перечисленные поля. */
+data class FolderStatePatch(
+    val alarmId: Int,
+    val folderFiles: List<com.timersound.model.FolderEntry>? = null,
+    val folderAccessLost: Boolean? = null,
+    val lastFolderIndex: Int? = null,
+)
 
 /**
  * Локальное хранилище настроек (DataStore + JSON).
@@ -88,6 +97,13 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Legacy API плоского конфига.
+     *
+     * Схема v3+ читает плоский конфиг из ПЕРВОЙ группы `groups_json`, поэтому
+     * legacy-ключи одних недостаточно: сохраняем ещё и первую группу, иначе
+     * save → load теряет будильники (тест round-trip ловил это).
+     */
     suspend fun save(config: TimerConfig) {
         context.dataStore.edit { p ->
             p[alarmsJsonKey] = alarmsJson.encodeToString(
@@ -97,6 +113,34 @@ class PreferencesRepository(private val context: Context) {
             p[autoStopKey] = config.autoStopMs
             p[maxFiresKey] = config.maxTotalFiresPerSession.coerceAtLeast(0)
             p[fadeInKey] = config.fadeInEnabled
+
+            val decoded = p[groupsJsonKey]?.let { jsonStr ->
+                runCatching { groupsJson.decodeFromString(GroupsListDto.serializer(), jsonStr) }.getOrNull()
+            }
+            val groups: List<GroupDto> = decoded?.groups.orEmpty()
+            val alarmDtos = config.alarms.map { it.toDto() }
+            val main = groups.firstOrNull()
+                ?.copy(
+                    alarms = alarmDtos,
+                    autoStopMs = config.autoStopMs.coerceAtLeast(0L),
+                    maxTotalFires = config.maxTotalFiresPerSession.coerceAtLeast(0),
+                )
+                ?: GroupDto(
+                    id = 0,
+                    name = "Основная",
+                    alarms = alarmDtos,
+                    enabled = true,
+                    weekdays = 0,
+                    autoStopMs = config.autoStopMs.coerceAtLeast(0L),
+                    maxTotalFires = config.maxTotalFiresPerSession.coerceAtLeast(0),
+                )
+            p[groupsJsonKey] = groupsJson.encodeToString(
+                GroupsListDto.serializer(),
+                GroupsListDto(
+                    listOf(main) + groups.drop(1),
+                    decoded?.nextGroupId ?: 1,
+                ),
+            )
         }
     }
 
@@ -189,6 +233,7 @@ class PreferencesRepository(private val context: Context) {
     suspend fun ensureMigrated() {
         ensureMigratedV1toV2()
         ensureMigratedV2toV3()
+        ensureMigratedV3toV4()
     }
 
     private suspend fun ensureMigratedV1toV2() {
@@ -263,6 +308,117 @@ class PreferencesRepository(private val context: Context) {
             edit[intPreferencesKey("next_alarm_id_g0")] = nextAlarmId
             edit[schemaVersionKey] = 3
         }
+    }
+
+    /**
+     * Идемпотентная миграция v3 → v4: появились источник звука (файл/папка)
+     * и режим громкости (фикс/диапазон).
+     *
+     * Данные не перестраиваются — достаточно перекодировать `groups_json`
+     * через новый DTO, чтобы новые поля будильников сохранились с дефолтами
+     * (FILE / FIXED) и старый JSON не откатывался на каждом чтении.
+     *
+     * Правила безопасности:
+     * - schema_version >= 4 → выход (идемпотентность)
+     * - groups_json отсутствует или не читается → лог + просто поднимаем версию,
+     *   НИЧЕГО не удаляем (потерять будильники нельзя)
+     */
+    private suspend fun ensureMigratedV3toV4() {
+        val current = context.dataStore.data.first()
+        if ((current[schemaVersionKey] ?: 1) >= 4) return
+
+        val raw = current[groupsJsonKey]
+        if (raw == null) {
+            AppLog.w("PreferencesRepository: миграция v3→v4, groups_json отсутствует — версия поднимается, данные не трогаем")
+            context.dataStore.edit { prefs -> prefs[schemaVersionKey] = 4 }
+            return
+        }
+        val decoded = runCatching {
+            groupsJson.decodeFromString(GroupsListDto.serializer(), raw)
+        }.getOrNull()
+        if (decoded == null) {
+            AppLog.e(
+                "PreferencesRepository: миграция v3→v4, битый groups_json (${raw.length} символов) — " +
+                    "данные не трогаем, версия поднимается",
+            )
+            context.dataStore.edit { prefs -> prefs[schemaVersionKey] = 4 }
+            return
+        }
+
+        context.dataStore.edit { prefs ->
+            // Перекодируем через новый DTO: новые поля доезжают в JSON с дефолтами.
+            prefs[groupsJsonKey] = groupsJson.encodeToString(
+                GroupsListDto.serializer(),
+                GroupsListDto(decoded.groups, decoded.nextGroupId),
+            )
+            prefs[schemaVersionKey] = 4
+        }
+    }
+
+    /**
+     * Точечный патч состояния папок будильников группы.
+     *
+     * Меняются ТОЛЬКО перечисленные в патче поля — имя, громкость, файл,
+     * остальные будильники и остальные группы не затрагиваются.
+     * Если группы или будильника нет — ничего не происходит (без исключений).
+     */
+    suspend fun patchFolderState(groupId: Int, patches: List<FolderStatePatch>) {
+        if (patches.isEmpty()) return
+        context.dataStore.edit { prefs ->
+            val updated = applyFolderStatePatch(prefs[groupsJsonKey], groupId, patches)
+            if (updated != null) {
+                prefs[groupsJsonKey] = updated
+            }
+        }
+    }
+
+    /**
+     * Собирает новый `groups_json` по патчу состояния папок.
+     *
+     * @return новый JSON или null, если менять нечего (нет групп/будильника,
+     *         битый JSON или значения уже такие же) — тогда запись не делается.
+     */
+    private fun applyFolderStatePatch(
+        raw: String?,
+        groupId: Int,
+        patches: List<FolderStatePatch>,
+    ): String? {
+        if (raw == null) return null
+        val decoded = runCatching {
+            groupsJson.decodeFromString(GroupsListDto.serializer(), raw)
+        }.getOrNull() ?: return null
+        val group = decoded.groups.firstOrNull { it.id == groupId } ?: return null
+
+        var changed = false
+        val newAlarms = group.alarms.map { alarm ->
+            val patch = patches.firstOrNull { it.alarmId == alarm.id } ?: return@map alarm
+            val newFiles = patch.folderFiles ?: alarm.folderFiles
+            val newLost = patch.folderAccessLost ?: alarm.folderAccessLost
+            val newIndex = patch.lastFolderIndex ?: alarm.lastFolderIndex
+            if (newFiles == alarm.folderFiles &&
+                newLost == alarm.folderAccessLost &&
+                newIndex == alarm.lastFolderIndex
+            ) {
+                alarm
+            } else {
+                changed = true
+                alarm.copy(
+                    folderFiles = newFiles,
+                    folderAccessLost = newLost,
+                    lastFolderIndex = newIndex,
+                )
+            }
+        }
+        // Ничего не изменилось — запись не нужна.
+        if (!changed) return null
+
+        return groupsJson.encodeToString(
+            GroupsListDto.serializer(),
+            GroupsListDto(
+                decoded.groups.map { if (it.id == groupId) it.copy(alarms = newAlarms) else it },
+                decoded.nextGroupId,
+            ),
+        )
     }
 
 

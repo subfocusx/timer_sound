@@ -15,8 +15,18 @@ import com.timersound.timer.SceneScheduler
  * @param startMinutes  Минуты с полуночи для запуска; null — поле не используется.
  * @param endMinutes    Минуты с полуночи, конец RANDOM-окна (exclusive).
  * @param launchCount   Количество срабатываний для INTERVAL/RANDOM; 0 — не задано.
- * @param volumePercent Громкость будильника, 0..100.
+ * @param volumePercent Громкость будильника, 0..100 (режим [VolumeMode.FIXED]).
  * @param enabled       Будильник включён в сессию таймера.
+ * @param sourceType    Источник звука: один файл или папка со звуками.
+ * @param folderUri     SAF-uri дерева-папки (persistable), "" — папка не выбрана.
+ * @param folderName    Отображаемое имя папки.
+ * @param folderFiles   Кэш сканирования папки (SAF-uri, не абсолютные пути).
+ * @param folderPlayMode Режим выбора файла из папки.
+ * @param lastFolderIndex Индекс последнего сыгранного файла папки (-1 — ещё не играли).
+ * @param folderAccessLost Доступ к папке отозван/папка удалена (сбрасывается при выборе заново).
+ * @param volumeMode    Фиксированная громкость или случайная в диапазоне.
+ * @param volumeMin     Нижняя граница диапазона громкости, 0..100.
+ * @param volumeMax     Верхняя граница диапазона громкости, 0..100 (min <= max).
  */
 data class AlarmConfig(
     val id: Int,
@@ -33,9 +43,56 @@ data class AlarmConfig(
     val launchCount: Int = 0,
     val volumePercent: Int,
     val enabled: Boolean,
+    /** Источник звука: FILE (по умолчанию) или FOLDER. */
+    val sourceType: SoundSourceType = SoundSourceType.FILE,
+    /** SAF-uri дерева-папки (persistable); "" — папка не выбрана. */
+    val folderUri: String = "",
+    /** Отображаемое имя папки (DISPLAY_NAME провайдера). */
+    val folderName: String? = null,
+    /** Кэш сканирования папки: SAF-uri + имя. Только первый уровень, сортировка по имени. */
+    val folderFiles: List<FolderEntry> = emptyList(),
+    /** Режим выбора файла из папки. */
+    val folderPlayMode: FolderPlayMode = FolderPlayMode.RANDOM_NOREPEAT,
+    /** Индекс последнего сыгранного файла папки; -1 — ещё не играли. */
+    val lastFolderIndex: Int = -1,
+    /** Доступ к папке отозван или папка удалена — нужно выбрать папку заново. */
+    val folderAccessLost: Boolean = false,
+    /** Фикс громкости или случайная в диапазоне. */
+    val volumeMode: VolumeMode = VolumeMode.FIXED,
+    /** Нижняя граница диапазона громкости, 0..100. */
+    val volumeMin: Int = 0,
+    /** Верхняя граница диапазона громкости, 0..100; инвариант min <= max. */
+    val volumeMax: Int = 100,
 ) {
-    val hasFile: Boolean get() = fileUri.isNotEmpty()
-    val isBuiltInBeep: Boolean get() = fileUri == Defaults.BUILT_IN_BEEP
+    /** Источник — папка? */
+    val isFolderSource: Boolean get() = sourceType == SoundSourceType.FOLDER
+
+    /** Папка выбрана (uri сохранён)? */
+    val hasFolder: Boolean get() = folderUri.isNotEmpty()
+
+    /**
+     * Играбелен ли будильник: для FILE — непустой fileUri, для FOLDER — выбранная
+     * папка с непустым кэшем и живым доступом.
+     * Пустая папка (нет аудио) и потерянный доступ играбельности не дают —
+     * старт блокируется как при пустом файле.
+     */
+    val hasFile: Boolean get() = when (sourceType) {
+        SoundSourceType.FILE -> fileUri.isNotEmpty()
+        SoundSourceType.FOLDER ->
+            hasFolder && !folderAccessLost && folderFiles.isNotEmpty()
+    }
+
+    val isBuiltInBeep: Boolean get() =
+        sourceType == SoundSourceType.FILE && fileUri == Defaults.BUILT_IN_BEEP
+
+    /**
+     * URI, которые будильник реально проигрывает. Для FOLDER — все файлы кэша,
+     * поэтому пересечение «папка vs одиночный файл из этой папки» тоже находится.
+     */
+    fun playbackUris(): Set<String> = when (sourceType) {
+        SoundSourceType.FILE -> if (fileUri.isEmpty()) emptySet() else setOf(fileUri)
+        SoundSourceType.FOLDER -> folderFiles.map { it.uri }.toSet()
+    }
 
     /** Поля расписания валидны для текущего режима. */
     val scheduleValid: Boolean get() = when (mode) {
@@ -70,7 +127,8 @@ data class TimerConfig(
         alarms.filter { it.enabled && it.hasFile && !it.scheduleValid }
 
     /**
-     * Пары включённых каналов с одинаковым файлом, чьи первые срабатывания
+     * Пары включённых каналов, которые могут проиграть один и тот же звук
+     * (одинаковый файл или пересечение по файлам папки) и чьи срабатывания
      * попадают в [windowMs] друг от друга — риск слышимого наложения/эха.
      * Только предупреждение, старт не блокирует.
      */
@@ -89,7 +147,9 @@ data class TimerConfig(
             for (j in i + 1 until playable.size) {
                 val a = playable[i]
                 val b = playable[j]
-                if (a.fileUri != b.fileUri) continue
+                // Пересечение считаем по фактическим URI: у папки это все файлы кэша,
+                // поэтому «папка vs одиночный файл из этой папки» тоже находится.
+                if (a.playbackUris().intersect(b.playbackUris()).isEmpty()) continue
                 val fa = fires[a.id].orEmpty()
                 val fb = fires[b.id].orEmpty()
                 if (fa.isEmpty() || fb.isEmpty()) continue
@@ -115,6 +175,10 @@ data class TimerConfig(
  * Моменты срабатываний канала на горизонте [horizonMs] от now.
  * Конечные режимы — через `SceneScheduler.fireTimesFor`; REPEAT — фаза
  * интервалов от `initialRepeatFire` с шагом `intervalMs`.
+ *
+ * Первое срабатывание REPEAT попадает в список ВСЕГДА, даже если оно дальше
+ * горизонта: иначе два канала с одинаковым файлом и поздним стартом считались бы
+ * «не пересекающимися» (список пуст → пара пропускалась), хотя звук совпадёт.
  */
 private fun fireTimesOnHorizon(
     alarm: AlarmConfig,
@@ -130,10 +194,13 @@ private fun fireTimesOnHorizon(
         val end = nowElapsedMs + horizonMs
         val result = mutableListOf<Long>()
         var t = first
-        while (t <= end) {
-            result.add(t)
+        result.add(t)
+        while (true) {
             if (t > Long.MAX_VALUE - step) break
-            t += step
+            val next = t + step
+            if (next > end) break
+            t = next
+            result.add(t)
         }
         return result
     }

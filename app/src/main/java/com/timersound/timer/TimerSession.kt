@@ -125,7 +125,7 @@ class TimerSession {
                 add(s.nextFireElapsedMs - nowElapsedMs)
                 addAll(s.finiteRemaining.map { it - nowElapsedMs })
             }
-            AppLog.i("TimerSession.plan: ch=${s.config.id} name=\"${s.config.name}\" mode=${s.config.mode} intervalMs=${s.config.intervalMs} startMin=${s.config.startMinutes} launches=${s.config.launchCount} offsetsMs=$offsets vol=${s.config.volumePercent}")
+            AppLog.i("TimerSession.plan: ch=${s.config.id} name=\"${s.config.name}\" mode=${s.config.mode} intervalMs=${s.config.intervalMs} startMin=${s.config.startMinutes} launches=${s.config.launchCount} offsetsMs=$offsets ${volumeLabel(s.config)}")
         }
         transitionTo(TimerState.RUNNING, "start")
     }
@@ -224,7 +224,7 @@ class TimerSession {
                     break
                 }
                 val planned = s.nextFireElapsedMs
-                AppLog.evt(s.config.id, s.config.name, planned, nowElapsedMs, s.config.fileUri.ifEmpty { "beep" })
+                AppLog.evt(s.config.id, s.config.name, planned, nowElapsedMs, soundLabel(s.config))
                 trigger(s.config)
                 fired++
                 totalFiresCount++
@@ -374,6 +374,20 @@ class TimerSession {
     companion object {
         /** Максимум пропущенных REPEAT-интервалов, досрабатываемых за один tick. */
         const val MAX_CATCHUP_FIRES_PER_TICK = 3
+
+        /** Что именно играет: файл, встроенный сигнал или папка. */
+        internal fun soundLabel(alarm: AlarmConfig): String = when {
+            alarm.isFolderSource -> "folder:${alarm.folderName ?: alarm.folderUri.substringAfterLast('/')}"
+            alarm.isBuiltInBeep -> "beep"
+            else -> alarm.fileUri.ifEmpty { "beep" }
+        }
+
+        /** Громкость в логе: фикс или диапазон. */
+        internal fun volumeLabel(alarm: AlarmConfig): String = when (alarm.volumeMode) {
+            com.timersound.model.VolumeMode.FIXED -> "vol=${alarm.volumePercent}%"
+            com.timersound.model.VolumeMode.RANDOM_RANGE ->
+                "vol=${alarm.volumeMin}-${alarm.volumeMax}% (случайно)"
+        }
 
         fun formatHms(ms: Long): String {
             val totalSec = (ms / 1000).coerceAtLeast(0L)

@@ -7,7 +7,11 @@ import android.provider.OpenableColumns
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,17 +22,28 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import com.timersound.audio.AudioEngine
+import com.timersound.audio.FolderScanResult
+import com.timersound.audio.FolderScanner
+import com.timersound.audio.FolderSoundPicker
 import com.timersound.audio.PreviewPlayer
+import com.timersound.audio.SoundRandom
+import com.timersound.audio.SoundVolume
 import com.timersound.data.PreferencesRepository
 import com.timersound.model.AlarmConfig
 import com.timersound.model.AlarmGroup
 import com.timersound.model.AppConfig
 import com.timersound.model.Defaults
+import com.timersound.model.FolderPlayMode
 import com.timersound.model.GroupLimits
 import com.timersound.model.GroupPresets
 import com.timersound.model.SceneMode
+import com.timersound.model.SoundSourceType
 import com.timersound.model.TimerConfig
+import com.timersound.model.VolumeMode
 import com.timersound.model.Weekdays
 import com.timersound.service.TimerSoundService
 import com.timersound.service.TimerStateHolder
@@ -96,11 +111,11 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
     fun markNotificationPermissionAsked() {
         _notificationPermissionAsked.value = true
-        viewModelScope.launch { repo.setNotificationPermissionAsked() }
+        ioScope.launch { repo.setNotificationPermissionAsked() }
     }
 
     fun dismissInterrupted() {
-        viewModelScope.launch {
+        ioScope.launch {
             repo.setSessionActive(false)
             repo.setActiveGroups(emptySet())
             _wasInterrupted.value = false
@@ -110,7 +125,9 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
-            repo.ensureMigrated()
+            // Миграция — до чтения конфига, но на IO-диспетчере: запись в DataStore
+            // не должна зависеть от диспетчера вызывающего (см. ioScope).
+            withContext(Dispatchers.IO) { repo.ensureMigrated() }
             val interrupted = repo.activeGroups()
             if (interrupted.isNotEmpty()) {
                 _interruptedGroups.value = interrupted
@@ -119,17 +136,84 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
                 _wasInterrupted.value = true
             }
             _notificationPermissionAsked.value = repo.wasNotificationPermissionAsked()
-            repo.appConfig.collect {
-                _app.value = it
-                if (_selectedGroupId.value == null) {
-                    _selectedGroupId.value = it.groups.firstOrNull()?.id
-                }
-                // Legacy-зеркало: первая группа → плоский конфиг.
-                val first = it.groups.firstOrNull()
-                if (first != null) {
-                    _configMode.value = first.toRunConfig(it.fadeInEnabled)
+            var foldersChecked = false
+            repo.appConfig.collect { cfg ->
+                latestFromRepo = cfg
+                applyFromRepo(cfg)
+                // При старте приложения права на папку могли быть отозваны,
+                // а содержимое — измениться: проверяем один раз.
+                if (!foldersChecked) {
+                    foldersChecked = true
+                    revalidateFolders(cfg)
                 }
             }
+        }
+    }
+
+    /** Последний конфиг, прочитанный из хранилища (может быть «старее» локального). */
+    private var latestFromRepo: AppConfig? = null
+
+    /**
+     * Применение конфига из хранилища.
+     *
+     * Пока есть НЕСОХРАНЁННЫЕ локальные правки, значение из хранилища не
+     * применяется: иначе «старый» снимок, доехавший после debounce-записи,
+     * откатывал бы правки пользователя (терялись бы будильники, добавленные
+     * подряд). После сохранения применяется последнее известное значение.
+     */
+    private fun applyFromRepo(cfg: AppConfig) {
+        if (savedRevision < localRevision) return
+        _app.value = cfg
+        if (_selectedGroupId.value == null) {
+            _selectedGroupId.value = cfg.groups.firstOrNull()?.id
+        }
+        // Legacy-зеркало: первая группа → плоский конфиг.
+        val first = cfg.groups.firstOrNull()
+        if (first != null) {
+            _configMode.value = first.toRunConfig(cfg.fadeInEnabled)
+        }
+    }
+
+    /**
+     * Проверка папок при старте приложения: право могло быть отозвано, папка —
+     * удалена, содержимое — измениться. Снимаем флаг «доступ потерян», если
+     * доступ снова есть, и обновляем кэш файлов (план §5).
+     */
+    private fun revalidateFolders(app: AppConfig) {
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val updated = withContext(Dispatchers.IO) {
+                app.groups.map { group ->
+                    var groupChanged = false
+                    val alarms = group.alarms.map { alarm ->
+                        if (!alarm.isFolderSource || !alarm.hasFolder) return@map alarm
+                        val scan = FolderScanner.scan(ctx, Uri.parse(alarm.folderUri))
+                        val next = when (scan) {
+                            is FolderScanResult.Ok -> alarm.copy(
+                                folderFiles = scan.files,
+                                folderAccessLost = false,
+                                lastFolderIndex = alarm.lastFolderIndex
+                                    .coerceIn(-1, (scan.files.size - 1).coerceAtLeast(-1)),
+                            )
+                            is FolderScanResult.AccessLost ->
+                                // Право есть, но сканирование не удалось (провайдер занят) —
+                                // кэш не трогаем. Права нет — доступ потерян по-настоящему.
+                                if (!FolderScanner.hasPersistedAccess(ctx, Uri.parse(alarm.folderUri))) {
+                                    alarm.copy(folderFiles = emptyList(), folderAccessLost = true)
+                                } else {
+                                    alarm
+                                }
+                        }
+                        if (next != alarm) groupChanged = true
+                        next
+                    }
+                    if (groupChanged) group.copy(alarms = alarms) else group
+                }
+            }
+            val changed = updated.zip(app.groups).any { (new, old) -> new != old }
+            if (!changed) return@launch
+            AppLog.i("revalidateFolders: состояние папок обновлено")
+            updateApp { it.copy(groups = updated) }
         }
     }
 
@@ -231,10 +315,16 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         AudioEngine.stopGroup(groupId)
         // SAF-права освобождаем только если URI не занят другими группами.
         val victim = _app.value.groups.firstOrNull { it.id == groupId } ?: return
-        val others = _app.value.groups.filter { it.id != groupId }.flatMap { it.alarms.map { a -> a.fileUri } }.toSet()
+        val others = _app.value.groups.filter { it.id != groupId }.flatMap { it.alarms }
+        val otherFiles = others.map { a -> a.fileUri }.toSet()
+        val otherFolders = others.map { a -> a.folderUri }.toSet()
         victim.alarms.forEach { a ->
-            if (a.fileUri.isNotEmpty() && a.fileUri != Defaults.BUILT_IN_BEEP && a.fileUri !in others) {
+            if (a.fileUri.isNotEmpty() && a.fileUri != Defaults.BUILT_IN_BEEP && a.fileUri !in otherFiles) {
                 releaseUri(a.fileUri)
+            }
+            // Право на папку отпускаем, только если её больше не использует никто.
+            if (a.folderUri.isNotEmpty() && a.folderUri !in otherFolders) {
+                releaseUri(a.folderUri)
             }
         }
         updateApp { it.copy(groups = it.groups.filter { g -> g.id != groupId }) }
@@ -301,8 +391,35 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         ) {
             PreviewPlayer.pause()
         } else {
-            PreviewPlayer.play(getApplication(), alarm, groupId)
+            // Для папки превью играет один случайный файл из неё:
+            // подставляем его в «эффективный» будильник-файл.
+            val effective = effectiveForPreview(alarm) ?: return
+            PreviewPlayer.play(getApplication(), effective, groupId)
         }
+    }
+
+    /**
+     * Будильник для превью: для источника-папки — один файл, выбранный
+     * по режиму папки (случайно без повтора / по порядку).
+     * null — играть нечего (пустая папка).
+     */
+    private fun effectiveForPreview(alarm: AlarmConfig): AlarmConfig? {
+        if (!alarm.isFolderSource) return alarm
+        val files = alarm.folderFiles
+        if (files.isEmpty()) return null
+        val index = FolderSoundPicker.nextIndex(
+            files.size,
+            alarm.folderPlayMode,
+            alarm.lastFolderIndex,
+            SoundRandom.random,
+        )
+        if (index < 0) return null
+        val picked = files[index]
+        return alarm.copy(
+            sourceType = SoundSourceType.FILE,
+            fileUri = picked.uri,
+            fileName = picked.name,
+        )
     }
 
     /** Legacy-сигнатура для старых вызовов (первая группа). */
@@ -348,6 +465,12 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
     fun removeFile(groupId: Int, id: Int) {
         if (isLocked(groupId)) { refuseEdit(); return }
         AudioEngine.stopChannel(id, groupId)
+        // У будильника-папки «файл» — это папка: чистим её, а не одиночный файл.
+        val alarm = groupOf(groupId)?.alarms?.firstOrNull { it.id == id }
+        if (alarm != null && alarm.isFolderSource) {
+            clearFolder(groupId, id)
+            return
+        }
         releaseAlarmPermission(groupId, id)
         updateApp { app ->
             app.copy(groups = app.groups.map { g ->
@@ -361,6 +484,130 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
     fun removeFile(id: Int) {
         val gid = _selectedGroupId.value ?: _app.value.groups.firstOrNull()?.id ?: return
         removeFile(gid, id)
+    }
+
+    // ------------------------------------------------------------------ folder source
+
+    /**
+     * Папка выбрана в системном пикере: забираем persistable-право чтения,
+     * сканируем содержимое и переключаем будильник на источник-папку.
+     *
+     * Если доступ закрыт (папка удалена, право отозвано, uri не дерево) —
+     * будильник помечается как «доступ потерян», показывается снекбар,
+     * приложение не падает.
+     */
+    fun onFolderPicked(groupId: Int, alarmId: Int, treeUri: Uri) {
+        if (isLocked(groupId)) { refuseEdit(); return }
+        val ctx = getApplication<Application>()
+        runCatching {
+            ctx.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }.onFailure { e ->
+            AppLog.w("onFolderPicked: не удалось взять persistable-право на $treeUri: $e")
+        }
+        when (val scan = FolderScanner.scan(ctx, treeUri)) {
+            is FolderScanResult.Ok -> {
+                val folderName = FolderScanner.queryDisplayName(ctx, treeUri)
+                updateApp { app ->
+                    app.copy(groups = app.groups.map { g ->
+                        if (g.id != groupId) g else g.copy(alarms = g.alarms.map { ch ->
+                            if (ch.id != alarmId) ch else ch.copy(
+                                sourceType = SoundSourceType.FOLDER,
+                                folderUri = treeUri.toString(),
+                                folderName = folderName,
+                                folderFiles = scan.files,
+                                folderAccessLost = false,
+                                lastFolderIndex = -1,
+                                enabled = true,
+                            )
+                        })
+                    })
+                }
+                AppLog.i(
+                    "onFolderPicked: папка \"$folderName\" — файлов ${scan.files.size}, " +
+                        "persistable-доступ=${FolderScanner.hasPersistedAccess(ctx, treeUri)}",
+                )
+            }
+
+            FolderScanResult.AccessLost -> {
+                updateApp { app ->
+                    app.copy(groups = app.groups.map { g ->
+                        if (g.id != groupId) g else g.copy(alarms = g.alarms.map { ch ->
+                            if (ch.id != alarmId) ch else ch.copy(
+                                sourceType = SoundSourceType.FOLDER,
+                                folderUri = treeUri.toString(),
+                                folderName = null,
+                                folderFiles = emptyList(),
+                                folderAccessLost = true,
+                                lastFolderIndex = -1,
+                                enabled = true,
+                            )
+                        })
+                    })
+                }
+                AppLog.w("onFolderPicked: нет доступа к папке $treeUri")
+                snack("Не удалось получить доступ к папке — выберите папку заново")
+            }
+        }
+    }
+
+    /**
+     * Переключатель источника звука (файл ↔ папка).
+     * Данные НЕ теряются: и файл, и папка остаются в модели,
+     * меняется только [AlarmConfig.sourceType].
+     */
+    fun setSourceType(groupId: Int, alarmId: Int, type: SoundSourceType) {
+        editAlarm(groupId, alarmId) { it.copy(sourceType = type) }
+    }
+
+    /** Режим выбора файла из папки; порядок начинается заново. */
+    fun setFolderPlayMode(groupId: Int, alarmId: Int, mode: FolderPlayMode) {
+        editAlarm(groupId, alarmId) { it.copy(folderPlayMode = mode, lastFolderIndex = -1) }
+    }
+
+    /**
+     * Сброс папки: uri, имя, кэш файлов, признак потерянного доступа и индекс.
+     * Persistable-право освобождается, только если папку больше не использует
+     * ни один будильник ни одной группы.
+     */
+    fun clearFolder(groupId: Int, alarmId: Int) {
+        if (isLocked(groupId)) { refuseEdit(); return }
+        val alarm = groupOf(groupId)?.alarms?.firstOrNull { it.id == alarmId } ?: return
+        val folderUri = alarm.folderUri
+        editAlarm(groupId, alarmId) {
+            it.copy(
+                folderUri = "",
+                folderName = null,
+                folderFiles = emptyList(),
+                folderAccessLost = false,
+                lastFolderIndex = -1,
+            )
+        }
+        if (folderUri.isNotEmpty() && !folderUriUsedElsewhere(groupId, alarmId, folderUri)) {
+            AppLog.i("clearFolder: освобождаем доступ к папке $folderUri")
+            releaseUri(folderUri)
+        }
+    }
+
+    /**
+     * Режим громкости: фикс или случайный диапазон.
+     * При переходе в диапазон границы стартуют с текущей громкости
+     * (пока пользователь их не расширит); уже настроенный диапазон не сбрасывается.
+     */
+    fun setVolumeMode(groupId: Int, alarmId: Int, mode: VolumeMode) {
+        editAlarm(groupId, alarmId) { alarm ->
+            if (mode == VolumeMode.RANDOM_RANGE && alarm.volumeMode != VolumeMode.RANDOM_RANGE) {
+                val current = alarm.volumePercent.coerceIn(0, 100)
+                alarm.copy(volumeMode = mode, volumeMin = current, volumeMax = current)
+            } else {
+                alarm.copy(volumeMode = mode)
+            }
+        }
+    }
+
+    /** Границы диапазона громкости; значения санируются (0 <= min <= max <= 100). */
+    fun setVolumeRange(groupId: Int, alarmId: Int, min: Int, max: Int) {
+        val (lo, hi) = SoundVolume.sanitizeRange(min, max)
+        editAlarm(groupId, alarmId) { it.copy(volumeMin = lo, volumeMax = hi) }
     }
 
     fun addAlarm(groupId: Int) {
@@ -387,6 +634,7 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         if (isLocked(groupId)) { refuseEdit(); return }
         AudioEngine.stopChannel(id, groupId)
         releaseAlarmPermission(groupId, id)
+        releaseAlarmFolderPermission(groupId, id)
         updateApp { app ->
             app.copy(groups = app.groups.map { g ->
                 if (g.id != groupId) g else g.copy(alarms = g.alarms.filter { it.id != id })
@@ -402,7 +650,10 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteAllAlarms(groupId: Int) {
         if (isLocked(groupId)) { refuseEdit(); return }
         AudioEngine.stopGroup(groupId)
-        groupOf(groupId)?.alarms?.forEach { releaseAlarmPermission(groupId, it.id) }
+        groupOf(groupId)?.alarms?.forEach {
+            releaseAlarmPermission(groupId, it.id)
+            releaseAlarmFolderPermission(groupId, it.id)
+        }
         updateApp { app ->
             app.copy(groups = app.groups.map { g -> if (g.id != groupId) g else g.copy(alarms = emptyList()) })
         }
@@ -493,15 +744,51 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
     private var saveJob: Job? = null
 
+    /**
+     * Счётчики ревизий: `localRevision` растёт на каждой локальной правке,
+     * `savedRevision` — после успешной записи. Пока `savedRevision < localRevision`,
+     * значение из хранилища не применяется (см. [applyFromRepo]).
+     */
+    private var localRevision = 0L
+    private var savedRevision = 0L
+
+    /** Записи в DataStore строго по порядку: старый снимок не перебивает новый. */
+    private val writeMutex = Mutex()
+
+    /**
+     * Отдельная область для записи на диск.
+     *
+     * Запись в DataStore выполняется НЕ из `viewModelScope` (диспетчер Main):
+     * актор DataStore выполняет трансформу записи в контексте вызывающего, и если
+     * этот контекст — Main (или тестовый планировщик, который уже завершён),
+     * запись «зависает» навсегда и следующие записи тоже. Свой IO-контекст
+     * делает запись независимой от диспетчера вызывающего.
+     */
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    override fun onCleared() {
+        super.onCleared()
+        ioScope.cancel()
+    }
+
     private fun updateApp(transform: (AppConfig) -> AppConfig) {
         val next = transform(_app.value)
         _app.value = next
         val first = next.groups.firstOrNull()
         if (first != null) _configMode.value = first.toRunConfig(next.fadeInEnabled)
+        localRevision++
+        val revision = localRevision
         saveJob?.cancel()
-        saveJob = viewModelScope.launch {
+        saveJob = ioScope.launch {
             delay(300)
-            repo.saveGroups(next)
+            writeMutex.withLock {
+                // Пока шла запись, правки могли измениться — тогда пишет более
+                // свежий снимок (следующий job), а этот устарел и не нужен.
+                if (revision != localRevision) return@withLock
+                repo.saveGroups(next)
+                savedRevision = revision
+                latestFromRepo?.let { applyFromRepo(it) }
+            }
             // После любого изменения групп/расписаний — rearm по уже сохранённому
             // конфигу (без второго чтения DataStore и без гонки с очередью).
             runCatching { WakeSchedulerRearm.rearmWith(getApplication(), next) }
@@ -549,6 +836,30 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         if (!usedElsewhere) releaseUri(uri)
     }
 
+    /**
+     * Освобождение persistable-права на папку будильника.
+     * Право отпускается, только если ту же папку не использует
+     * ни один другой будильник ни одной группы.
+     */
+    private fun releaseAlarmFolderPermission(groupId: Int, id: Int) {
+        val uri = groupOf(groupId)?.alarms?.firstOrNull { it.id == id }?.folderUri ?: return
+        if (uri.isEmpty()) return
+        if (!folderUriUsedElsewhere(groupId, id, uri)) {
+            AppLog.i("releaseAlarmFolderPermission: освобождаем доступ к папке $uri")
+            releaseUri(uri)
+        }
+    }
+
+    /** Использует ли кто-то (кроме указанного будильника) эту папку. */
+    private fun folderUriUsedElsewhere(groupId: Int, alarmId: Int, uri: String): Boolean {
+        if (uri.isEmpty()) return false
+        return _app.value.groups.flatMap { it.alarms }
+            .any {
+                it.folderUri == uri &&
+                    !(it.id == alarmId && groupOf(groupId)?.alarms?.contains(it) == true)
+            }
+    }
+
     private fun releaseUri(uri: String) {
         val ctx = getApplication<Application>()
         runCatching {
@@ -560,6 +871,9 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
     fun fileDisplayName(alarm: AlarmConfig): String? {
         return when {
+            // Источник-папка: показываем имя папки и число файлов в ней.
+            alarm.isFolderSource ->
+                "Папка: " + (alarm.folderName ?: "папка") + " (" + alarm.folderFiles.size + ")"
             alarm.isBuiltInBeep -> "Встроенный сигнал (бип)"
             !alarm.hasFile -> null
             else -> {

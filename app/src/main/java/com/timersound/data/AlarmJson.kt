@@ -3,11 +3,19 @@ package com.timersound.data
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import com.timersound.model.AlarmConfig
+import com.timersound.model.FolderEntry
+import com.timersound.model.FolderPlayMode
 import com.timersound.model.SceneMode
+import com.timersound.model.SoundSourceType
+import com.timersound.model.VolumeMode
 
 /**
  * DTO для JSON-сериализации списка будильников.
  * Формат на диске не привязан жёстко к доменной модели [AlarmConfig].
+ *
+ * Схема v4 добавила поля источника звука (файл/папка) и режима громкости.
+ * Все новые поля имеют значения по умолчанию, поэтому старый JSON (v3 и ниже)
+ * читается как есть: `ignoreUnknownKeys = true` + дефолты = FILE / громкость FIXED.
  */
 @Serializable
 data class AlarmDto(
@@ -22,6 +30,26 @@ data class AlarmDto(
     val launchCount: Int = 0,
     val volumePercent: Int,
     val enabled: Boolean,
+    /** Источник звука: FILE (по умолчанию) или FOLDER. */
+    val sourceType: SoundSourceType = SoundSourceType.FILE,
+    /** SAF-uri дерева-папки; "" — папка не выбрана. */
+    val folderUri: String = "",
+    /** Отображаемое имя папки. */
+    val folderName: String? = null,
+    /** Кэш сканирования папки (SAF-uri + имя). */
+    val folderFiles: List<FolderEntry> = emptyList(),
+    /** Режим выбора файла из папки. */
+    val folderPlayMode: FolderPlayMode = FolderPlayMode.RANDOM_NOREPEAT,
+    /** Индекс последнего сыгранного файла папки; -1 — ещё не играли. */
+    val lastFolderIndex: Int = -1,
+    /** Доступ к папке отозван или папка удалена. */
+    val folderAccessLost: Boolean = false,
+    /** Фикс громкости или случайная в диапазоне. */
+    val volumeMode: VolumeMode = VolumeMode.FIXED,
+    /** Нижняя граница диапазона громкости, 0..100. */
+    val volumeMin: Int = 0,
+    /** Верхняя граница диапазона громкости, 0..100. */
+    val volumeMax: Int = 100,
 )
 
 /** Обёртка для сериализации списка (kotlinx.serialization требует именованный тип для List). */
@@ -42,6 +70,16 @@ internal fun AlarmConfig.toDto(): AlarmDto = AlarmDto(
     launchCount = launchCount,
     volumePercent = volumePercent,
     enabled = enabled,
+    sourceType = sourceType,
+    folderUri = folderUri,
+    folderName = folderName,
+    folderFiles = folderFiles,
+    folderPlayMode = folderPlayMode,
+    lastFolderIndex = lastFolderIndex,
+    folderAccessLost = folderAccessLost,
+    volumeMode = volumeMode,
+    volumeMin = volumeMin,
+    volumeMax = volumeMax,
 )
 
 internal fun AlarmDto.toAlarmConfig(): AlarmConfig = AlarmConfig(
@@ -56,6 +94,16 @@ internal fun AlarmDto.toAlarmConfig(): AlarmConfig = AlarmConfig(
     launchCount = launchCount,
     volumePercent = volumePercent,
     enabled = enabled,
+    sourceType = sourceType,
+    folderUri = folderUri,
+    folderName = folderName,
+    folderFiles = folderFiles,
+    folderPlayMode = folderPlayMode,
+    lastFolderIndex = lastFolderIndex,
+    folderAccessLost = folderAccessLost,
+    volumeMode = volumeMode,
+    volumeMin = volumeMin,
+    volumeMax = volumeMax,
 )
 
 /**
@@ -69,7 +117,7 @@ internal val alarmsJson = Json {
     encodeDefaults = true
 }
 
-/** DTO группы будильников (схема v3). */
+/** DTO группы будильников (схема v3; будильники внутри — схема v4). */
 @Serializable
 data class GroupDto(
     val id: Int,

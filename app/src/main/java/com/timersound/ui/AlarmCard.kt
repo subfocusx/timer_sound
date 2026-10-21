@@ -49,9 +49,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.timersound.TimerViewModel
 import com.timersound.audio.PreviewPlayer
+import com.timersound.audio.SoundVolume
 import com.timersound.model.AlarmConfig
+import com.timersound.model.FolderEntry
+import com.timersound.model.FolderPlayMode
 import com.timersound.model.SceneMode
 import com.timersound.model.Defaults
+import com.timersound.model.SoundSourceType
+import com.timersound.model.VolumeMode
 import com.timersound.timer.TimerSession
 import com.timersound.timer.TimerState
 
@@ -68,6 +73,7 @@ fun AlarmCard(
     onToggleExpand: () -> Unit,
     onDelete: () -> Unit,
     onPickFile: () -> Unit,
+    onPickFolder: () -> Unit = {},
     hasOverlap: Boolean = false,
 ) {
     val groupRuntimes by vm.groupRuntimes.collectAsStateWithLifecycle()
@@ -207,7 +213,13 @@ fun AlarmCard(
 
             // ---- Expanded view ----
             if (isExpanded && canEdit) {
-                ExpandedAlarmContent(alarm = alarm, groupId = groupId, vm = vm, onPickFile = onPickFile)
+                ExpandedAlarmContent(
+                    alarm = alarm,
+                    groupId = groupId,
+                    vm = vm,
+                    onPickFile = onPickFile,
+                    onPickFolder = onPickFolder,
+                )
             }
         }
     }
@@ -217,6 +229,9 @@ fun AlarmCard(
  * Компактная сводка режима для свёрнутой карточки: только то, чего не видно в чипе режима.
  * Раньше строка начиналась с повторённого `mode.label` и раздувалась до «N раз, каждые … ·
  * 09:30:00, 3x до 12:00:00 · 80%» — не влезала и обрезалась.
+ *
+ * Громкость: фикс — «80%», диапазон — «50–80%». Для источника-папки добавляется
+ * маркер «папка», иначе свёрнутая карточка не отличит папку от одиночного файла.
  */
 internal fun alarmSummary(alarm: AlarmConfig): String = buildString {
     when (alarm.mode) {
@@ -236,13 +251,47 @@ internal fun alarmSummary(alarm: AlarmConfig): String = buildString {
             if (alarm.launchCount > 0) append(", ${alarm.launchCount}×")
         }
     }
-    append(" · ${alarm.volumePercent}%")
+    append(" · ${volumeSummary(alarm)}")
+    if (alarm.sourceType == SoundSourceType.FOLDER) append(" · $FOLDER_MARKER")
+}
+
+/**
+ * Часть сводки про громкость: «80%» для фикса, «50–80%» для диапазона.
+ * Границы диапазона санируются (0..100, min <= max) — «−5–120%» в UI не показываем.
+ */
+internal fun volumeSummary(alarm: AlarmConfig): String = when (alarm.volumeMode) {
+    VolumeMode.FIXED -> "${alarm.volumePercent}%"
+    VolumeMode.RANDOM_RANGE -> {
+        val (lo, hi) = SoundVolume.sanitizeRange(alarm.volumeMin, alarm.volumeMax)
+        "$lo–$hi%"
+    }
+}
+
+/** Короткий маркер источника-папки в свёрнутой сводке. */
+internal const val FOLDER_MARKER = "папка"
+
+/**
+ * Предпросмотр содержимого папки: первые [limit] имён через запятую,
+ * если файлов больше — хвост «… и ещё N».
+ */
+internal fun folderFilesPreview(files: List<FolderEntry>, limit: Int = 5): String {
+    if (files.isEmpty()) return ""
+    val shown = files.take(limit.coerceAtLeast(0))
+    val names = shown.joinToString(", ") { it.name }
+    val rest = files.size - shown.size
+    return if (rest > 0) "$names … и ещё $rest" else names
 }
 
 // ------------------------------------------------------------------ expanded content
 
 @Composable
-private fun ExpandedAlarmContent(alarm: AlarmConfig, groupId: Int, vm: TimerViewModel, onPickFile: () -> Unit) {
+private fun ExpandedAlarmContent(
+    alarm: AlarmConfig,
+    groupId: Int,
+    vm: TimerViewModel,
+    onPickFile: () -> Unit,
+    onPickFolder: () -> Unit,
+) {
     var name by remember(alarm.name) { mutableStateOf(alarm.name) }
 
     Column(
@@ -334,34 +383,203 @@ private fun ExpandedAlarmContent(alarm: AlarmConfig, groupId: Int, vm: TimerView
             )
         }
 
-        // Volume slider
+        // ---- Источник звука: один файл или папка ----
+        Text(
+            text = "Источник звука",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        ) {
+            SoundSourceType.values().forEach { type ->
+                FilterChip(
+                    selected = alarm.sourceType == type,
+                    onClick = { vm.setSourceType(groupId, alarm.id, type) },
+                    label = { Text(type.label, maxLines = 1, softWrap = false) },
+                    modifier = Modifier.testTag(
+                        when (type) {
+                            SoundSourceType.FILE -> "alarm_source_file_${alarm.id}"
+                            SoundSourceType.FOLDER -> "alarm_source_folder_${alarm.id}"
+                        }
+                    ),
+                )
+            }
+        }
+
+        // ---- Громкость: фикс или диапазон ----
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = "Громкость",
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
             )
-            Slider(
-                value = alarm.volumePercent.toFloat(),
-                onValueChange = { vm.setVolume(groupId, alarm.id, it.toInt()) },
-                valueRange = 0f..100f,
-                modifier = Modifier.weight(3f),
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                VolumeMode.values().forEach { mode ->
+                    FilterChip(
+                        selected = alarm.volumeMode == mode,
+                        onClick = { vm.setVolumeMode(groupId, alarm.id, mode) },
+                        label = { Text(mode.label, maxLines = 1, softWrap = false) },
+                        modifier = Modifier.testTag(
+                            when (mode) {
+                                VolumeMode.FIXED -> "alarm_volume_mode_fixed_${alarm.id}"
+                                VolumeMode.RANDOM_RANGE -> "alarm_volume_mode_range_${alarm.id}"
+                            }
+                        ),
+                    )
+                }
+            }
+        }
+        if (alarm.volumeMode == VolumeMode.FIXED) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Slider(
+                    value = alarm.volumePercent.toFloat(),
+                    onValueChange = { vm.setVolume(groupId, alarm.id, it.toInt()) },
+                    valueRange = 0f..100f,
+                    modifier = Modifier.weight(3f).testTag("alarm_volume_${alarm.id}"),
+                )
+                Text(
+                    text = "${alarm.volumePercent}%",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        } else {
+            // Диапазон: нижний ползунок не выше верхнего, верхний — не ниже нижнего.
+            val (lo, hi) = SoundVolume.sanitizeRange(alarm.volumeMin, alarm.volumeMax)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Slider(
+                    value = lo.toFloat(),
+                    onValueChange = { v ->
+                        vm.setVolumeRange(groupId, alarm.id, v.toInt().coerceIn(0, hi), hi)
+                    },
+                    valueRange = sliderRange(0, hi),
+                    modifier = Modifier.weight(3f).testTag("alarm_volume_min_${alarm.id}"),
+                )
+                Text(
+                    text = "мин $lo%",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Slider(
+                    value = hi.toFloat(),
+                    onValueChange = { v ->
+                        vm.setVolumeRange(groupId, alarm.id, lo, v.toInt().coerceIn(lo, 100))
+                    },
+                    valueRange = sliderRange(lo, 100),
+                    modifier = Modifier.weight(3f).testTag("alarm_volume_max_${alarm.id}"),
+                )
+                Text(
+                    text = "макс $hi%",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
             Text(
-                text = "${alarm.volumePercent}%",
-                style = MaterialTheme.typography.labelLarge,
+                text = "Диапазон: $lo–$hi%",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("alarm_volume_range_${alarm.id}"),
             )
         }
 
-        // File operations
+        // ---- Файл/папка: выбор, встроенный сигнал, сброс ----
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = onPickFile) { Text("Выбрать") }
-            TextButton(onClick = { vm.setBuiltInBeep(groupId, alarm.id) }) { Text("Встроенный бип") }
-            TextButton(onClick = { vm.removeFile(groupId, alarm.id) }) {
+            TextButton(
+                onClick = onPickFile,
+                modifier = Modifier.testTag("alarm_file_pick_${alarm.id}"),
+            ) { Text("Выбрать") }
+            TextButton(
+                onClick = onPickFolder,
+                modifier = Modifier.testTag("alarm_folder_pick_${alarm.id}"),
+            ) { Text("Выбрать папку") }
+            TextButton(
+                onClick = {
+                    // Встроенный бип — это одиночный файл: при активном источнике «Папка»
+                    // сигнал был бы не виден в интерфейсе, поэтому сначала переключаем источник.
+                    vm.setSourceType(groupId, alarm.id, SoundSourceType.FILE)
+                    vm.setBuiltInBeep(groupId, alarm.id)
+                },
+                modifier = Modifier.testTag("alarm_beep_${alarm.id}"),
+            ) { Text("Встроенный бип") }
+            TextButton(
+                onClick = { vm.removeFile(groupId, alarm.id) },
+                modifier = Modifier.testTag("alarm_remove_${alarm.id}"),
+            ) {
                 Text(if (alarm.isBuiltInBeep) "Сброс" else "Удалить")
             }
         }
+
+        // ---- Блок папки: состояние доступа, содержимое, режим выбора файла ----
+        if (alarm.sourceType == SoundSourceType.FOLDER) {
+            Column(
+                modifier = Modifier.fillMaxWidth().testTag("alarm_folder_block_${alarm.id}"),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                when {
+                    alarm.folderAccessLost -> Text(
+                        text = "Доступ потерян — выберите папку снова",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("alarm_folder_info_${alarm.id}"),
+                    )
+                    alarm.folderUri.isEmpty() -> Text(
+                        text = "Папка не выбрана",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("alarm_folder_info_${alarm.id}"),
+                    )
+                    alarm.folderFiles.isEmpty() -> Text(
+                        text = "В папке нет аудиофайлов",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("alarm_folder_info_${alarm.id}"),
+                    )
+                    else -> {
+                        Text(
+                            text = "Папка: ${alarm.folderName ?: "папка"} (${alarm.folderFiles.size} файлов)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.testTag("alarm_folder_info_${alarm.id}"),
+                        )
+                        Text(
+                            text = folderFilesPreview(alarm.folderFiles),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("alarm_folder_files_${alarm.id}"),
+                        )
+                    }
+                }
+                if (alarm.folderFiles.isNotEmpty()) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    ) {
+                        FolderPlayMode.values().forEach { mode ->
+                            FilterChip(
+                                selected = alarm.folderPlayMode == mode,
+                                onClick = { vm.setFolderPlayMode(groupId, alarm.id, mode) },
+                                label = { Text(mode.label, maxLines = 1, softWrap = false) },
+                                modifier = Modifier.testTag(
+                                    when (mode) {
+                                        FolderPlayMode.RANDOM_NOREPEAT -> "alarm_folder_mode_random_${alarm.id}"
+                                        FolderPlayMode.SEQUENTIAL -> "alarm_folder_mode_sequential_${alarm.id}"
+                                    }
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+/**
+ * Диапазон ползунка без вырожденных границ (start == end): такие границы
+ * Material3 не переваривает, поэтому верхнюю границу слегка расширяем.
+ */
+private fun sliderRange(start: Int, end: Int): ClosedFloatingPointRange<Float> {
+    val lo = start.toFloat()
+    val hi = end.toFloat()
+    return if (hi > lo) lo..hi else lo..(lo + 1f)
 }
 
 // ------------------------------------------------------------------ input helpers

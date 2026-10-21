@@ -54,7 +54,9 @@ class GroupsMigrationTest {
         repo.ensureMigrated()
 
         val raw = context.dataStore.data.first()
-        assertEquals(3, raw[intPreferencesKey("schema_version")])
+        // v3: плоский конфиг → группа «Основная»; v4: добавлены поля источника
+        // звука (файл/папка) и режима громкости.
+        assertEquals(4, raw[intPreferencesKey("schema_version")])
         assertNull(raw[stringPreferencesKey("alarms_json")])
         assertNull(raw[longPreferencesKey("auto_stop_ms")])
         assertNull(raw[intPreferencesKey("max_total_fires")])
@@ -86,7 +88,7 @@ class GroupsMigrationTest {
         val first = repo.appConfig.first()
         repo.ensureMigrated()
         assertEquals(first, repo.appConfig.first())
-        assertEquals(3, context.dataStore.data.first()[intPreferencesKey("schema_version")])
+        assertEquals(4, context.dataStore.data.first()[intPreferencesKey("schema_version")])
     }
 
     @Test

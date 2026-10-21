@@ -120,11 +120,32 @@ fun GroupCard(
                 )
             }
             GroupMiniTimer(runtime)
+            // Источник звука не задан (файл/папка) — старт невозможен.
+            // Показываем причину, а не даём нажать «Старт» в пустоту.
+            val missingSound = group.alarms.filter { it.enabled && !it.hasFile }
+            if (missingSound.isNotEmpty()) {
+                Text(
+                    text = "Для старта укажите источник звука: " +
+                        missingSound.joinToString(", ") { alarm ->
+                            when {
+                                alarm.isFolderSource && alarm.folderAccessLost ->
+                                    "${alarm.name} (доступ к папке потерян)"
+                                alarm.isFolderSource ->
+                                    "${alarm.name} (в папке нет аудиофайлов)"
+                                else -> alarm.name
+                            }
+                        },
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("group_missing_sound_${group.id}"),
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 when (state) {
                     TimerState.IDLE, TimerState.COMPLETED -> {
                         OutlinedButton(
                             onClick = { vm.startGroup(group.id) },
+                            enabled = missingSound.isEmpty() && group.playableAlarms().isNotEmpty(),
                             modifier = Modifier.testTag("group_start_${group.id}"),
                         ) { Text(if (state == TimerState.COMPLETED) "Заново" else "Старт") }
                     }
