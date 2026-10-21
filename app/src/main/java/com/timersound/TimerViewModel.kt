@@ -192,6 +192,9 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
                             is FolderScanResult.Ok -> alarm.copy(
                                 folderFiles = scan.files,
                                 folderAccessLost = false,
+                                // Имя папки могло остаться пустым — восстанавливаем.
+                                folderName = alarm.folderName
+                                    ?: FolderScanner.queryDisplayName(ctx, Uri.parse(alarm.folderUri)),
                                 lastFolderIndex = alarm.lastFolderIndex
                                     .coerceIn(-1, (scan.files.size - 1).coerceAtLeast(-1)),
                             )

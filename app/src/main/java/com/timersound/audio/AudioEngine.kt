@@ -2,6 +2,7 @@ package com.timersound.audio
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.MediaExtractor
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.net.Uri
@@ -14,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Audio engine: one independent [Ringtone] per channel - timers ring through the
@@ -41,6 +43,47 @@ object AudioEngine {
 
     /** Уникальный ключ звука: (groupId, alarmId). */
     data class RingKey(val groupId: Int, val alarmId: Int)
+
+    /**
+     * Кэш проверки «файл вообще играбелен» по uri.
+     *
+     * Проверка идёт на каждом срабатывании, а читать и декодировать файл
+     * каждый раз дорого. Кэшируем только успех: битый файл пользователь может
+     * заменить на рабочий — тогда файл снова проверится.
+     */
+    private val playableCache = ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * Проверка, что файл читается и декодируется (а не просто существует).
+     *
+     * Зачем: `Ringtone` на битом файле НЕ бросает исключение — он молча
+     * переключается на системный рингтон (в logcat: `Open file failed, goto
+     * fallback, uri=content://settings/system/ringtone`). Из-за этого сломанный
+     * файл из папки играл системным звонком вместо тишины, а счётчик ошибок
+     * не рос. Проверяем файл ДО воспроизведения и отдаём false — звонок
+     * пропускается, сервис берёт следующий файл папки.
+     *
+     * Проверка идёт через [MediaExtractor] — тот же разборщик, что и у
+     * [android.media.MediaPlayer]: если дорожек нет, файл не декодируется.
+     */
+    internal fun isPlayable(context: Context, uri: Uri): Boolean {
+        val key = uri.toString()
+        playableCache[key]?.let { return it }
+        val ok = try {
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(context, uri, null)
+                extractor.trackCount > 0
+            } finally {
+                extractor.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "AudioEngine.isPlayable: файл не читается uri=$uri: ${e.message}")
+            false
+        }
+        if (ok) playableCache[key] = true
+        return ok
+    }
 
     /** Session channel players (key = RingKey). LinkedHashMap для FIFO (стоп самых старых). */
     private val players = LinkedHashMap<RingKey, Ringtone>()
@@ -71,6 +114,11 @@ object AudioEngine {
 
     /** Ключ (groupId, alarmId): стоп одной группы не глушит звук другой. */
     fun playKeyed(context: Context, key: RingKey, alarm: AlarmConfig, fadeIn: Boolean = false): Boolean {
+        // Проверка файла — ДО блокировки: это чтение с носителя, держать под ним lock нельзя.
+        if (!alarm.isBuiltInBeep && !isPlayable(context, Uri.parse(alarm.fileUri))) {
+            Log.w(TAG, "AudioEngine.play: NO playable source key=$key uri=${alarm.fileUri} - aborted")
+            return false
+        }
         val handle: PlayHandle? = synchronized(lock) {
             try {
                 val ring = createRingtone(context, alarm)
@@ -117,6 +165,12 @@ object AudioEngine {
 
     /** One-shot preview of a channel signal (not tied to the timer session). */
     fun preview(context: Context, alarm: AlarmConfig, groupId: Int = 0) {
+        // Битый файл Ringtone не отвергает, а молча играет системным рингтоном —
+        // проверяем заранее, чтобы превью было тихим (см. [isPlayable]).
+        if (!alarm.isBuiltInBeep && !isPlayable(context, Uri.parse(alarm.fileUri))) {
+            Log.w(TAG, "AudioEngine.preview: ch=${alarm.id} uri=${alarm.fileUri} - файл не играбелен")
+            return
+        }
         synchronized(lock) {
             try {
                 val key = RingKey(groupId, alarm.id)

@@ -86,13 +86,18 @@ data class AlarmConfig(
         sourceType == SoundSourceType.FILE && fileUri == Defaults.BUILT_IN_BEEP
 
     /**
-     * URI, которые будильник реально проигрывает. Для FOLDER — все файлы кэша,
-     * поэтому пересечение «папка vs одиночный файл из этой папки» тоже находится.
+     * URI, которые будильник реально проигрывает. Для FOLDER — все файлы кэша.
      */
     fun playbackUris(): Set<String> = when (sourceType) {
         SoundSourceType.FILE -> if (fileUri.isEmpty()) emptySet() else setOf(fileUri)
         SoundSourceType.FOLDER -> folderFiles.map { it.uri }.toSet()
     }
+
+    /**
+     * Ключи документов для сравнения: один и тот же файл из папки и выбранный
+     * отдельно — разные uri, но один документ (см. [SoundUri.documentKey]).
+     */
+    fun playbackKeys(): Set<String> = playbackUris().map { SoundUri.documentKey(it) }.toSet()
 
     /** Поля расписания валидны для текущего режима. */
     val scheduleValid: Boolean get() = when (mode) {
@@ -147,9 +152,10 @@ data class TimerConfig(
             for (j in i + 1 until playable.size) {
                 val a = playable[i]
                 val b = playable[j]
-                // Пересечение считаем по фактическим URI: у папки это все файлы кэша,
-                // поэтому «папка vs одиночный файл из этой папки» тоже находится.
-                if (a.playbackUris().intersect(b.playbackUris()).isEmpty()) continue
+                // Пересечение считаем по фактическим документам: у папки это все файлы кэша,
+                // поэтому «папка vs одиночный файл из этой папки» тоже находится
+                // (uri разные, документ один — см. [SoundUri.documentKey]).
+                if (a.playbackKeys().intersect(b.playbackKeys()).isEmpty()) continue
                 val fa = fires[a.id].orEmpty()
                 val fb = fires[b.id].orEmpty()
                 if (fa.isEmpty() || fb.isEmpty()) continue

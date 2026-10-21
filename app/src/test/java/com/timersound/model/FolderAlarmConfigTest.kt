@@ -150,4 +150,26 @@ class FolderAlarmConfigTest {
 
         assertTrue(cfg.overlappingAlarms(nowElapsedMs = 0L, nowWallMs = 0L).isEmpty())
     }
+
+    @Test
+    fun overlappingAlarmsFindsFilePickedFromSameFolder() {
+        // Реальные формы uri с устройства: файл из папки адресован через дерево,
+        // тот же файл из пикера файлов — напрямую. Документ один, строки разные.
+        val treeFileUri =
+            "content://com.android.externalstorage.documents/tree/primary%3AMusic%2FAlarmSounds" +
+                "/document/primary%3AMusic%2FAlarmSounds%2F01_tone_440.wav"
+        val pickedFileUri =
+            "content://com.android.externalstorage.documents/document/primary%3AMusic%2FAlarmSounds%2F01_tone_440.wav"
+        val cfg = TimerConfig(
+            alarms = listOf(
+                fileAlarm(id = 0, fileUri = pickedFileUri).repeatingAt(startMinutes = 10),
+                folderAlarm(id = 1, uris = listOf(treeFileUri)).repeatingAt(startMinutes = 10),
+            ),
+            autoStopMs = 0L,
+        )
+
+        val pairs = cfg.overlappingAlarms(nowElapsedMs = 0L, nowWallMs = 0L)
+        assertEquals(1, pairs.size)
+        assertEquals(setOf(0, 1), setOf(pairs[0].first.id, pairs[0].second.id))
+    }
 }

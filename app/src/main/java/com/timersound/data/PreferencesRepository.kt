@@ -53,6 +53,8 @@ data class FolderStatePatch(
     val folderFiles: List<com.timersound.model.FolderEntry>? = null,
     val folderAccessLost: Boolean? = null,
     val lastFolderIndex: Int? = null,
+    /** Отображаемое имя папки; null — не менять. */
+    val folderName: String? = null,
 )
 
 /**
@@ -395,9 +397,11 @@ class PreferencesRepository(private val context: Context) {
             val newFiles = patch.folderFiles ?: alarm.folderFiles
             val newLost = patch.folderAccessLost ?: alarm.folderAccessLost
             val newIndex = patch.lastFolderIndex ?: alarm.lastFolderIndex
+            val newName = patch.folderName ?: alarm.folderName
             if (newFiles == alarm.folderFiles &&
                 newLost == alarm.folderAccessLost &&
-                newIndex == alarm.lastFolderIndex
+                newIndex == alarm.lastFolderIndex &&
+                newName == alarm.folderName
             ) {
                 alarm
             } else {
@@ -406,6 +410,7 @@ class PreferencesRepository(private val context: Context) {
                     folderFiles = newFiles,
                     folderAccessLost = newLost,
                     lastFolderIndex = newIndex,
+                    folderName = newName,
                 )
             }
         }

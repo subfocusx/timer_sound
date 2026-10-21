@@ -102,4 +102,57 @@ class FolderSoundPickerTest {
             assertTrue(next in 0..2, "индекс вне диапазона: $next")
         }
     }
+
+    @Test
+    fun excludedIndexIsNeverPicked() {
+        // Битый файл исключается — следующий файл папки должен играть.
+        val random = Random(11L)
+        repeat(500) {
+            val next = FolderSoundPicker.nextIndex(4, FolderPlayMode.RANDOM_NOREPEAT, -1, random, exclude = setOf(2))
+            assertTrue(next in 0..3, "индекс вне диапазона: $next")
+            assertTrue(next != 2, "выпал исключённый индекс: $next")
+        }
+    }
+
+    @Test
+    fun sequentialSkipsExcludedIndex() {
+        // По порядку: после 0 идёт 1, но если 1 исключён — берём 2.
+        val random = Random(5L)
+        assertEquals(
+            2,
+            FolderSoundPicker.nextIndex(4, FolderPlayMode.SEQUENTIAL, 0, random, exclude = setOf(1)),
+        )
+    }
+
+    @Test
+    fun sequentialWrapsAroundExcludedIndexes() {
+        // Последний файл исключён — по кругу доходим до первого.
+        val random = Random(5L)
+        assertEquals(
+            0,
+            FolderSoundPicker.nextIndex(3, FolderPlayMode.SEQUENTIAL, 2, random, exclude = setOf(2)),
+        )
+    }
+
+    @Test
+    fun allIndexesExcludedMeansNothingToPlay() {
+        val random = Random(5L)
+        assertEquals(
+            FolderSoundPicker.NO_INDEX,
+            FolderSoundPicker.nextIndex(3, FolderPlayMode.SEQUENTIAL, -1, random, exclude = setOf(0, 1, 2)),
+        )
+        assertEquals(
+            FolderSoundPicker.NO_INDEX,
+            FolderSoundPicker.nextIndex(3, FolderPlayMode.RANDOM_NOREPEAT, -1, random, exclude = setOf(0, 1, 2)),
+        )
+    }
+
+    @Test
+    fun singleFileFolderExcludedMeansNothingToPlay() {
+        val random = Random(5L)
+        assertEquals(
+            FolderSoundPicker.NO_INDEX,
+            FolderSoundPicker.nextIndex(1, FolderPlayMode.SEQUENTIAL, -1, random, exclude = setOf(0)),
+        )
+    }
 }

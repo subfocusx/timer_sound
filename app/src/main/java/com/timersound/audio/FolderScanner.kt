@@ -92,24 +92,25 @@ object FolderScanner {
     /**
      * Отображаемое имя документа (DISPLAY_NAME) или null.
      *
-     * Для uri-дерева имя лежит в корневом документе, поэтому пробуем сначала
-     * сам tree-uri, потом документ дерева.
+     * Имя корня дерева лежит в документе дерева, поэтому пробуем сначала
+     * документ дерева, потом сам tree-uri.
+     *
+     * Каждая попытка изолирована своим `runCatching`: провайдеры не умеют
+     * отдавать DISPLAY_NAME по tree-uri (`UnsupportedOperationException`),
+     * и без изоляции падение первой попытки отменяло бы вторую.
      */
     fun queryDisplayName(context: Context, uri: Uri): String? {
+        val cr = context.contentResolver
+        val projection = arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+        // 1) Документ дерева: buildDocumentUriUsingTree даёт uri, который провайдер понимает.
+        val viaTreeDocument = runCatching {
+            val docId = DocumentsContract.getTreeDocumentId(uri)
+            queryDisplayNameInternal(cr, DocumentsContract.buildDocumentUriUsingTree(uri, docId), projection)
+        }.getOrNull()
+        if (!viaTreeDocument.isNullOrEmpty()) return viaTreeDocument
+        // 2) Сам tree-uri — часть провайдеров отдаёт имя только так.
         return runCatching {
-            val cr = context.contentResolver
-            val projection = arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-            val direct = queryDisplayNameInternal(cr, uri, projection)
-            if (direct != null) {
-                direct
-            } else {
-                val docId = DocumentsContract.getTreeDocumentId(uri)
-                queryDisplayNameInternal(
-                    cr,
-                    DocumentsContract.buildDocumentUriUsingTree(uri, docId),
-                    projection,
-                )
-            }
+            queryDisplayNameInternal(cr, uri, projection)
         }.getOrElse { e ->
             AppLog.w("FolderScanner.queryDisplayName: не удалось получить имя $uri: $e")
             null

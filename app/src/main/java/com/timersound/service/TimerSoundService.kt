@@ -231,15 +231,20 @@ class TimerSoundService : Service() {
         val patches = mutableListOf<FolderStatePatch>()
         val updated: List<AlarmConfig> = config.alarms.map { alarm ->
             if (!alarm.isFolderSource || !alarm.hasFolder) return@map alarm
-                when (val scan = FolderScanner.scan(applicationContext, Uri.parse(alarm.folderUri))) {
+            when (val scan = FolderScanner.scan(applicationContext, Uri.parse(alarm.folderUri))) {
                 is FolderScanResult.Ok -> {
                     val files = scan.files
-                    if (files != alarm.folderFiles) {
+                    // Имя папки могло остаться пустым (например, провайдер не отдал его
+                    // при выборе) — восстанавливаем его из документа дерева.
+                    val name = alarm.folderName
+                        ?: FolderScanner.queryDisplayName(applicationContext, Uri.parse(alarm.folderUri))
+                    if (files != alarm.folderFiles || name != alarm.folderName) {
                         patches.add(
                             FolderStatePatch(
                                 alarmId = alarm.id,
                                 folderFiles = files,
                                 folderAccessLost = false,
+                                folderName = name,
                             ),
                         )
                     } else if (alarm.folderAccessLost) {
@@ -249,6 +254,7 @@ class TimerSoundService : Service() {
                     }
                     alarm.copy(
                         folderFiles = files,
+                        folderName = name,
                         folderAccessLost = false,
                         lastFolderIndex = alarm.lastFolderIndex.coerceIn(-1, files.size - 1),
                     )
@@ -488,6 +494,9 @@ class TimerSoundService : Service() {
      *
      * Один тик = один play на будильник: соседние будильники не делят плеер
      * (ключ звука — (groupId, alarmId)), фаза интервалов не сдвигается.
+     *
+     * Битый файл в папке не блокирует будильник: неудачные индексы исключаются,
+     * и следующий файл папки играет в том же срабатывании.
      */
     private fun playChannel(groupId: Int, alarm: AlarmConfig) {
         val key = AudioEngine.RingKey(groupId, alarm.id)
@@ -500,10 +509,16 @@ class TimerSoundService : Service() {
             )
             return
         }
-        var candidate = alarm
+        // Индексы файлов папки, которые не удалось воспроизвести в этом срабатывании.
+        val failed = mutableSetOf<Int>()
         var attempt = 0
         while (attempt < MAX_PLAY_ATTEMPTS) {
-            val resolved = resolveForPlay(groupId, candidate) ?: return
+            val resolved = resolveForPlay(groupId, alarm, failed)
+            if (resolved == null) {
+                // Играть нечего: папка пуста или все файлы не воспроизвелись.
+                if (failed.isEmpty()) return
+                break
+            }
             val ok = AudioEngine.play(
                 applicationContext,
                 resolved.alarm,
@@ -515,12 +530,8 @@ class TimerSoundService : Service() {
                 return
             }
             attempt++
-            if (!candidate.isFolderSource) break
-            // Битый файл в папке не должен блокировать будильник: пробуем следующий.
-            val badIndex = resolved.folderIndex
-            val rest = candidate.folderFiles.filterIndexed { index, _ -> index != badIndex }
-            if (rest.isEmpty()) break
-            candidate = candidate.copy(folderFiles = rest)
+            if (!alarm.isFolderSource) break
+            failed += resolved.folderIndex
         }
         val newStreak = (playErrorStreak[key] ?: 0) + 1
         playErrorStreak[key] = newStreak
@@ -530,8 +541,16 @@ class TimerSoundService : Service() {
         )
     }
 
-    /** Резолв источника и громкости для очередного срабатывания. */
-    private fun resolveForPlay(groupId: Int, alarm: AlarmConfig): ResolvedPlay? {
+    /**
+     * Резолв источника и громкости для очередного срабатывания.
+     *
+     * @param exclude индексы файлов папки, которые уже не воспроизвелись.
+     */
+    private fun resolveForPlay(
+        groupId: Int,
+        alarm: AlarmConfig,
+        exclude: Set<Int> = emptySet(),
+    ): ResolvedPlay? {
         val volume = SoundVolume.resolveFor(alarm, SoundRandom.random)
         if (!alarm.isFolderSource) {
             return ResolvedPlay(alarm.copy(volumePercent = volume), -1)
@@ -548,6 +567,7 @@ class TimerSoundService : Service() {
             mode = alarm.folderPlayMode,
             lastIndex = cursor,
             random = SoundRandom.random,
+            exclude = exclude,
         )
         if (index < 0) return null
         folderCursors[key] = index

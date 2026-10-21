@@ -23,24 +23,35 @@ object FolderSoundPicker {
      * @param mode      режим выбора.
      * @param lastIndex индекс только что сыгранного файла (-1 — ещё не играли).
      * @param random    источник случайности (в приложении — один на процесс).
+     * @param exclude   индексы файлов, которые нельзя брать (только что не воспроизвелись).
+     * @return индекс файла или [NO_INDEX], если брать нечего.
      */
-    fun nextIndex(size: Int, mode: FolderPlayMode, lastIndex: Int, random: Random): Int {
+    fun nextIndex(
+        size: Int,
+        mode: FolderPlayMode,
+        lastIndex: Int,
+        random: Random,
+        exclude: Set<Int> = emptySet(),
+    ): Int {
         if (size <= 0) return NO_INDEX
-        if (size == 1) return 0
+        if (size == 1) return if (0 in exclude) NO_INDEX else 0
+        val forbidden = lastIndex.takeIf { it in 0 until size }
+        val allowed = (0 until size).filter { it != forbidden && it !in exclude }
+        if (allowed.isEmpty()) return NO_INDEX
         return when (mode) {
             FolderPlayMode.SEQUENTIAL -> {
-                val next = lastIndex + 1
-                if (next >= size) 0 else next.coerceAtLeast(0)
+                // Идём по кругу от следующего после lastIndex, пропуская исключённые.
+                var idx = ((forbidden ?: -1) + 1) % size
+                var guard = 0
+                while (idx in exclude && guard < size) {
+                    idx = (idx + 1) % size
+                    guard++
+                }
+                if (idx in exclude) NO_INDEX else idx
             }
             FolderPlayMode.RANDOM_NOREPEAT -> {
-                val forbidden = lastIndex.takeIf { it in 0 until size }
-                if (forbidden == null) {
-                    random.nextInt(size)
-                } else {
-                    // Равномерный выбор из (size - 1) вариантов без запрещённого индекса.
-                    val pick = random.nextInt(size - 1)
-                    if (pick >= forbidden) pick + 1 else pick
-                }
+                // Равномерный выбор среди допустимых (без только что сыгранного).
+                allowed[random.nextInt(allowed.size)]
             }
         }
     }
