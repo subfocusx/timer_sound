@@ -4,18 +4,19 @@ import android.app.Application
 import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.remember
+import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.ComposeTimeoutException
-import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.timersound.TimerViewModel
@@ -35,6 +36,18 @@ import org.junit.runner.RunWith
 /**
  * Compose UI-тесты списка групп (устройство/эмулятор).
  * Сервис не запускается: проверяются структура, теги и блокировки правок.
+ *
+ * Три особенности дерева семантики Compose, из-за которых тесты написаны так:
+ *
+ * 1. Кликабельная `Card` (карточка группы) помечает узел
+ *    `MergeDescendants = true`, поэтому вложенные в неё `Text` (название
+ *    группы, бейдж состояния) в merged-дереве НЕ существуют — их теги
+ *    поглощаются слиянием. Поиск узлов и чтение текста идут по unmerged-дереву.
+ * 2. У `Text` с `Modifier.clickable` текст лежит в ПОТОМКЕ, а не в самом узле
+ *    с тегом, — поэтому текст берём обходом поддерева.
+ * 3. `performClick` по карточке кликает в её ЦЕНТР, а там чип дня недели:
+ *    переключался день вместо открытия группы. Поэтому кликаем касанием по
+ *    конкретному вложенному узлу — событие всплывает до кликабельной карточки.
  */
 @RunWith(AndroidJUnit4::class)
 class AppUiTest {
@@ -98,18 +111,65 @@ class AppUiTest {
         }
     }
 
-    private fun scrollTo(tag: String) {
-        composeRule.onAllNodes(hasScrollAction()).onFirst().performScrollToNode(hasTestTag(tag))
+    // ------------------------------------------------------------------ поиск узлов
+
+    /** Узлы с тегом в unmerged-дереве: там есть и поглощённые слиянием. */
+    private fun nodes(tag: String): List<SemanticsNode> =
+        composeRule.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes()
+
+    /** Текст узла с тегом: свой + текст потомков (у кликабельного Text текст в потомке). */
+    private fun textOf(tag: String): String? {
+        val node = nodes(tag).firstOrNull() ?: return null
+        val sb = StringBuilder()
+        fun collect(n: SemanticsNode) {
+            n.config.getOrNull(SemanticsProperties.Text)?.forEach { sb.append(it.text) }
+            n.children.forEach { collect(it) }
+        }
+        collect(node)
+        return sb.toString().ifEmpty { null }
     }
 
-    private fun textOf(tag: String): String? =
-        composeRule.onAllNodesWithTag(tag).fetchSemanticsNodes().firstOrNull()
-            ?.config?.getOrNull(SemanticsProperties.Text)?.joinToString("") { it.text }
+    // ------------------------------------------------------------------ скролл
+
+    /** Вертикальный скролл-контейнер (LazyColumn), а не горизонтальные ряды чипов. */
+    private fun verticalScrollable() =
+        composeRule.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.VerticalScrollAxisRange)).onFirst()
+
+    /**
+     * Прокручивает список так, чтобы узел с тегом стал виден.
+     *
+     * Для узла merged-дерева — штатный `performScrollToNode`. Для узла,
+     * поглощённого слиянием (`Card(onClick)`), скроллим к ближайшему
+     * предку с тегом (сама карточка).
+     */
+    private fun scrollTo(tag: String) {
+        if (composeRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()) {
+            runCatching { verticalScrollable().performScrollToNode(hasTestTag(tag)) }
+            return
+        }
+        val anchor = nearestTaggedAncestor(tag)
+        if (anchor != null) {
+            runCatching { verticalScrollable().performScrollToNode(hasTestTag(anchor)) }
+            composeRule.waitForIdle()
+        }
+    }
+
+    /** Ближайший предок узла с тегом (карточка-родитель поглощённого узла). */
+    private fun nearestTaggedAncestor(tag: String): String? {
+        var parent = nodes(tag).firstOrNull()?.parent
+        while (parent != null) {
+            val parentTag = parent.config.getOrNull(SemanticsProperties.TestTag)
+            if (parentTag != null) return parentTag
+            parent = parent.parent
+        }
+        return null
+    }
 
     private fun awaitText(tag: String, expected: String) {
         try {
             composeRule.waitUntil(timeoutMillis = 5_000) {
-                runCatching { scrollTo(tag) }.isSuccess && textOf(tag) == expected
+                runCatching { scrollTo(tag) }
+                textOf(tag) == expected
             }
         } catch (timeout: ComposeTimeoutException) {
             throw AssertionError(
@@ -117,6 +177,18 @@ class AppUiTest {
                 timeout,
             )
         }
+    }
+
+    /** Касание по узлу с тегом (событие всплывает до кликабельного родителя). */
+    private fun click(tag: String) {
+        scrollTo(tag)
+        composeRule.onAllNodesWithTag(tag, useUnmergedTree = true).onFirst()
+            .performTouchInput { click() }
+        composeRule.waitForIdle()
+    }
+
+    private fun assertDisplayed(tag: String) {
+        composeRule.onAllNodesWithTag(tag, useUnmergedTree = true).onFirst().assertIsDisplayed()
     }
 
     // ------------------------------------------------------------------ tests
@@ -127,7 +199,7 @@ class AppUiTest {
         showApp()
 
         awaitText("group_name_0", "Основная")
-        composeRule.onNodeWithTag("group_card_0").assertIsDisplayed()
+        assertDisplayed("group_card_0")
     }
 
     @Test
@@ -137,7 +209,7 @@ class AppUiTest {
 
         awaitText("group_name_0", "Основная")
         scrollTo("group_start_0")
-        composeRule.onNodeWithTag("group_start_0").assertIsDisplayed()
+        assertDisplayed("group_start_0")
     }
 
     @Test
@@ -160,8 +232,8 @@ class AppUiTest {
         showApp()
 
         scrollTo("btn_pause_all")
-        composeRule.onNodeWithTag("btn_pause_all").assertIsDisplayed()
-        composeRule.onNodeWithTag("btn_stop_all").assertIsDisplayed()
+        assertDisplayed("btn_pause_all")
+        assertDisplayed("btn_stop_all")
     }
 
     @Test
@@ -170,7 +242,31 @@ class AppUiTest {
         showApp()
 
         awaitText("group_name_0", "Основная")
-        composeRule.onNodeWithTag("fab_add_group").performClick()
-        composeRule.onNodeWithTag("preset_0").assertIsDisplayed()
+        click("fab_add_group")
+        assertDisplayed("preset_0")
+    }
+
+    /**
+     * Ряд действий источника звука: все четыре кнопки должны быть видимы.
+     *
+     * Раньше это были подписи-кнопки, и четвёртая («Удалить») не влезала в ряд —
+     * она обрезалась и становилась недоступной. Теперь это иконки, но регресс
+     * всё равно возможен, поэтому проверяем явно.
+     */
+    @Test
+    fun alarmSourceActionsAllVisible() {
+        seed(Defaults.newAlarm(0, 0))
+        showApp()
+
+        awaitText("group_name_0", "Основная")
+        click("group_name_0")
+        awaitText("alarm_name_0", "Будильник 1")
+        click("alarm_expand_0")
+
+        scrollTo("alarm_file_pick_0")
+        assertDisplayed("alarm_file_pick_0")
+        assertDisplayed("alarm_folder_pick_0")
+        assertDisplayed("alarm_beep_0")
+        assertDisplayed("alarm_remove_0")
     }
 }

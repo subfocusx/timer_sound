@@ -11,6 +11,7 @@ import com.timersound.data.dataStore
 import androidx.datastore.preferences.core.edit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -78,6 +79,14 @@ class TimerViewModelTest {
 
     @After
     fun tearDown() {
+        if (::viewModel.isInitialized) {
+            // Скоуп VM пережил бы тест: коллекторы мёртвой VM реагируют на сид
+            // следующего теста и планируют отложенные записи (debounce 300 мс
+            // реального времени в независимом ioScope) поверх него.
+            // Гасим скоуп и даём отложенным записям отработать до сида.
+            viewModel.viewModelScope.cancel()
+            kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(700) }
+        }
         TimerStateHolder.reset()
         Dispatchers.resetMain()
     }

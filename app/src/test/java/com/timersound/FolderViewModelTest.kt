@@ -3,6 +3,7 @@ package com.timersound
 import android.app.Application
 import android.net.Uri
 import androidx.datastore.preferences.core.edit
+import androidx.lifecycle.viewModelScope
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.test.core.app.ApplicationProvider
 import com.timersound.data.PreferencesRepository
@@ -18,6 +19,7 @@ import com.timersound.model.VolumeMode
 import com.timersound.service.TimerStateHolder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -129,6 +131,12 @@ class FolderViewModelTest {
 
     @After
     fun tearDown() {
+        // См. TimerViewModelTest.tearDown: гасим скоуп, иначе отложенные записи
+        // утекают в следующий тест через общий DataStore.
+        if (::viewModel.isInitialized) {
+            viewModel.viewModelScope.cancel()
+            kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(700) }
+        }
         TimerStateHolder.reset()
         Dispatchers.resetMain()
     }
