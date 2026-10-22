@@ -46,7 +46,10 @@ class DeviceRaceTest {
                                 Defaults.newAlarm(0, 0).copy(
                                     mode = SceneMode.ONCE_TIME,
                                     startMinutes = 0,
-                                    fileUri = "",
+                                    // Играбельный источник: сервис не стартует группу,
+                                    // у которой нет ни файла, ни папки (handleStart отсекает
+                                    // пустые playableAlarms). Берём встроенный бип.
+                                    fileUri = Defaults.BUILT_IN_BEEP,
                                 ),
                             ),
                             enabled = true,

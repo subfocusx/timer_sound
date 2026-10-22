@@ -753,3 +753,79 @@ FAB «Добавить»               перекрывал нижний ряд 
 
 Регресс-тесты: `sceneModeLabelsAreShortAndComplete` (подписи ≤ 9 символов и без «…»),
 `alarmSummaryDoesNotDuplicateModeLabel`, `alarmSummaryPerMode`.
+
+## 13. Повторная device-верификация UI-тестов (22.10.2026)
+
+### Контекст
+
+Прогон UI-тестов на устройстве в предыдущей сессии не был завершён: телефон отключился
+от adb по USB уже после того, как код был проверен и закоммичен. Ограничение оставалось
+незакрытым. В этой сессии устройство снова доступно (`CLCDU18523003574`, COL-L29, Android 10),
+поэтому прогон выполнен заново — на том же коде, что и коммит `607d952`.
+
+### Инфраструктура: JDK
+
+На машине **не оказалось установленной Java**: ни в `PATH`, ни в `JAVA_HOME` (machine/user),
+ни в реестре `HKLM\SOFTWARE\JavaSoft`, ни в стандартных каталогах (`Program Files`,
+`Program Files (x86)`, `AppData\Local\Programs`, `D:\`, `E:\`, `F:\`); `java.exe` не найден
+нигде на дисках. Сборка Gradle без JDK невозможна (`JAVA_HOME is not set`), поэтому установлен
+**портативный Temurin JDK 17** в `C:\Users\sfx\Tools\jdk17\jdk-17.0.20.1+1`
+(версия соответствует `sourceCompatibility/targetCompatibility = 17`, `jvmTarget = JVM_17`).
+
+Сборка идёт с:
+```
+JAVA_HOME=C:\Users\sfx\Tools\jdk17\jdk-17.0.20.1+1
+GRADLE_USER_HOME=E:\Code\Software\Timer_sound\.gradle-home-test
+ANDROID_HOME=C:\Users\sfx\AppData\Local\Android\Sdk
+```
+(`GRADLE_USER_HOME` — проектный кэш, чтобы не тянуть зависимости заново; `adb` лежит
+в `platform-tools`, в системный `PATH` не прописан.)
+
+### Результаты
+
+| Прогон | Результат |
+|---|---|
+| `connectedDebugAndroidTest` (все классы) | **8/8 зелёных** на COL-L29 |
+| `AppUiTest` (отдельно, повторно) | **6/6 зелёных** |
+| `DeviceRaceTest` (отдельно, до правки) | 1/2 — `restartAfterNaturalCompletionSurvives` таймаут 10 с |
+| `testDebugUnitTest` | **230 тестов, 0 падений** |
+| `assembleDebug` / `assembleDebugAndroidTest` | успешно |
+
+Итоговый XML: `app/build/outputs/androidTest-results/connected/debug/TEST-COL-L29 - 10.xml`.
+
+### Найденный дефект теста: `DeviceRaceTest.restartAfterNaturalCompletionSurvives`
+
+Тест готовит группу с будильником `Defaults.newAlarm(0, 0).copy(fileUri = "")` — то есть
+**без источника звука**. Сервис такое старт отсекает:
+
+```
+TimerSoundService.handleStart: prepared.playableAlarms().isEmpty() → return
+```
+
+`AlarmConfig.hasFile` для `SoundSourceType.FILE` = `fileUri.isNotEmpty()`, поэтому группа
+не играбельна, `handleStart` выходит до `session.start(...)`, состояние остаётся `IDLE`,
+и `awaitState(RUNNING)` упирается в `withTimeout(10_000)` → `TimeoutCancellationException`.
+
+Воспроизводится стабильно (2 прогона подряд, без флака). Это **дефект теста, а не приложения**:
+тест был написан до появления встроенного сигнала (`Defaults.BUILT_IN_BEEP = "@beep"`,
+`res/raw/beep.wav`) и модели «играбельности», и с тех пор сеял заведомо незапускаемую группу.
+
+Правка (только тест, код приложения не тронут): в `setUp` будильник получает
+`fileUri = Defaults.BUILT_IN_BEEP` — источник есть, группа стартует, `RUNNING` достигается,
+проверка рестарта снова имеет смысл.
+
+### Регресс-результат после правки
+
+```
+DeviceRaceTest.startThenStopAlwaysEndsIdle                 ok  4.254 s
+DeviceRaceTest.restartAfterNaturalCompletionSurvives       ok  1.358 s
+AppUiTest.runningGroupShowsStateBadge                      ok  2.689 s
+AppUiTest.groupListShowsSeededGroup                        ok  0.679 s
+AppUiTest.alarmSourceActionsAllVisible                     ok  1.786 s
+AppUiTest.groupStartStopButtonsExist                       ok  0.730 s
+AppUiTest.addGroupFabOpensPresetPicker                     ok  0.876 s
+AppUiTest.pauseAllStopAllVisibleWhenActive                 ok  0.623 s
+```
+
+Ограничение прошлой сессии (устройство отвалилось по USB) закрыто: UI-тесты перепроверены
+на том же закоммиченном коде, плюс впервые прогнан весь набор instrumented-тестов.
