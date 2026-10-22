@@ -13,10 +13,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Card
@@ -43,6 +46,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import kotlin.math.roundToInt
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
@@ -444,15 +448,19 @@ private fun ExpandedAlarmContent(
                 )
             }
         } else {
-            // Диапазон: нижний ползунок не выше верхнего, верхний — не ниже нижнего.
+            // Диапазон: оба ползунка на полном диапазоне 0..100, нижний не выше
+            // верхнего и наоборот — ограничение в onValueChange, а не в valueRange.
+            // Иначе (диапазон одного ползунка зависит от значения другого) при
+            // перетаскивании одной ручки вторая визуально прыгает, хотя её
+            // значение не менялось.
             val (lo, hi) = SoundVolume.sanitizeRange(alarm.volumeMin, alarm.volumeMax)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Slider(
                     value = lo.toFloat(),
                     onValueChange = { v ->
-                        vm.setVolumeRange(groupId, alarm.id, v.toInt().coerceIn(0, hi), hi)
+                        vm.setVolumeRange(groupId, alarm.id, v.roundToInt().coerceIn(0, hi), hi)
                     },
-                    valueRange = sliderRange(0, hi),
+                    valueRange = 0f..100f,
                     modifier = Modifier.weight(3f).testTag("alarm_volume_min_${alarm.id}"),
                 )
                 Text(
@@ -464,9 +472,9 @@ private fun ExpandedAlarmContent(
                 Slider(
                     value = hi.toFloat(),
                     onValueChange = { v ->
-                        vm.setVolumeRange(groupId, alarm.id, lo, v.toInt().coerceIn(lo, 100))
+                        vm.setVolumeRange(groupId, alarm.id, lo, v.roundToInt().coerceIn(lo, 100))
                     },
-                    valueRange = sliderRange(lo, 100),
+                    valueRange = 0f..100f,
                     modifier = Modifier.weight(3f).testTag("alarm_volume_max_${alarm.id}"),
                 )
                 Text(
@@ -481,17 +489,26 @@ private fun ExpandedAlarmContent(
             )
         }
 
-        // ---- Файл/папка: выбор, встроенный сигнал, сброс ----
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(
+        // ---- Файл/папка: иконки вместо слов — компактно, четвёртая кнопка
+        // раньше не влезала в строку и обрезалась. ContentDescription дублируют
+        // старые подписи для TalkBack.
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(
                 onClick = onPickFile,
                 modifier = Modifier.testTag("alarm_file_pick_${alarm.id}"),
-            ) { Text("Выбрать") }
-            TextButton(
+            ) {
+                Icon(Icons.Default.AudioFile, contentDescription = "Выбрать файл")
+            }
+            IconButton(
                 onClick = onPickFolder,
                 modifier = Modifier.testTag("alarm_folder_pick_${alarm.id}"),
-            ) { Text("Выбрать папку") }
-            TextButton(
+            ) {
+                Icon(Icons.Default.CreateNewFolder, contentDescription = "Выбрать папку")
+            }
+            IconButton(
                 onClick = {
                     // Встроенный бип — это одиночный файл: при активном источнике «Папка»
                     // сигнал был бы не виден в интерфейсе, поэтому сначала переключаем источник.
@@ -499,12 +516,17 @@ private fun ExpandedAlarmContent(
                     vm.setBuiltInBeep(groupId, alarm.id)
                 },
                 modifier = Modifier.testTag("alarm_beep_${alarm.id}"),
-            ) { Text("Встроенный бип") }
-            TextButton(
+            ) {
+                Icon(Icons.Default.MusicNote, contentDescription = "Встроенный бип")
+            }
+            IconButton(
                 onClick = { vm.removeFile(groupId, alarm.id) },
                 modifier = Modifier.testTag("alarm_remove_${alarm.id}"),
             ) {
-                Text(if (alarm.isBuiltInBeep) "Сброс" else "Удалить")
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = if (alarm.isBuiltInBeep) "Сброс" else "Удалить файл",
+                )
             }
         }
 
@@ -570,16 +592,6 @@ private fun ExpandedAlarmContent(
             }
         }
     }
-}
-
-/**
- * Диапазон ползунка без вырожденных границ (start == end): такие границы
- * Material3 не переваривает, поэтому верхнюю границу слегка расширяем.
- */
-private fun sliderRange(start: Int, end: Int): ClosedFloatingPointRange<Float> {
-    val lo = start.toFloat()
-    val hi = end.toFloat()
-    return if (hi > lo) lo..hi else lo..(lo + 1f)
 }
 
 // ------------------------------------------------------------------ input helpers
